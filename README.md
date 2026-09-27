@@ -28,7 +28,8 @@
 macOS 13+，Swift 5.9+ / Xcode Command Line Tools。
 
 ```sh
-swift test
+swift test  # 完整 Xcode 环境
+# 仅安装 Command Line Tools 时可改用：bash scripts/test-core.sh
 bash scripts/build-app.sh
 open dist/KongVox.app
 ```
