@@ -33,7 +33,7 @@ struct StudioView: View {
                     }
                 }.listStyle(.sidebar).disabled(studio.busy)
                 Button { state.showSettings = true } label: { Label("服务设置", systemImage: "key") }.disabled(studio.busy)
-                Text("KongVox 0.3 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
+                Text("KongVox 0.3.1 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
             }.padding(18).navigationSplitViewColumnWidth(230)
         } detail: {
             VStack(spacing: 0) {
@@ -95,6 +95,9 @@ struct StudioView: View {
             }
             VStack(alignment: .leading, spacing: 8) {
                 Text("表达要求")
+                if p.settings.resolvedService.kind == .qwenTTS {
+                    Text("Qwen Flash 使用默认语速；Instruct Flash 才支持表达与语速提示。每段最多 600 字。").font(.caption2).foregroundStyle(.secondary)
+                }
                 if p.settings.resolvedService.kind == .cosyVoice {
                     Text("CosyVoice 指令需符合音色要求，例如：你说话的情感是happy。留空使用预设；不支持指令的模型仅使用声音和语速。").font(.caption2).foregroundStyle(.secondary)
                 }

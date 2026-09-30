@@ -29,7 +29,7 @@ import AVFoundation
     }
     func cancel() { task?.cancel(); player?.stop(); player = nil }
     func recoveryFile() -> URL? {
-        guard let root = recoveryRoot, let service = try? value(), service.kind == .cosyVoice else { return nil }
+        guard let root = recoveryRoot, let service = try? value(), service.kind.usesAudioDownload else { return nil }
         var settings = VoiceSettings(); settings.service = service; settings.voice = testVoice
         return root.appendingPathComponent(Segment(text: testText).fingerprint(settings) + ".json")
     }
@@ -95,6 +95,7 @@ struct ServiceSettings: View {
                     Menu("添加服务") {
                         Button("Gemini 原生") { add(.gemini) }
                         Button("阿里云 CosyVoice") { add(.cosyVoice) }
+                        Button("阿里云 Qwen-TTS") { add(.qwenTTS) }
                         Button("OpenAI 兼容 API") { add(.openAI) }
                     }
                     Text("切换前请保存当前修改。").font(.caption2).foregroundStyle(.secondary)
@@ -153,11 +154,15 @@ struct ServiceSettings: View {
             TextField("https://…/v1 或 …/v1beta", text: $editor.profile.baseURL)
             Text("模型名称").font(.caption)
             TextField("TTS 模型 ID", text: $editor.profile.model)
-            if editor.profile.kind == .gemini {
-                Menu("选择 Gemini 模型预设") {
-                    ForEach(["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts", "gemini-3.1-flash-tts-preview", "gemini-2.5-pro-preview-tts"], id: \.self) { model in Button(model) { editor.profile.model = model } }
+            Menu("选择模型预设") {
+                    ForEach(editor.profile.modelPresets, id: \.self) { model in Button(model) { editor.profile.model = model } }
                 }.fixedSize()
+            if editor.profile.kind == .gemini {
                 Text("使用 Google AI Studio API Key；gen-lang-client-… 是项目 ID，不能用作密钥。模型可用性取决于你的账户。").font(.caption).foregroundStyle(.secondary)
+            } else if editor.profile.kind == .qwenTTS {
+                Text("使用百炼北京地域 API Key，需在此服务单独保存。Flash 用于标准朗读；Instruct Flash 支持表达要求和语速提示。标准 Flash 不应用语速与表达设置。每段最多 600 字，新导入文稿自动按不超过 500 字拆分。").font(.caption).foregroundStyle(.secondary)
+                Text("默认音色 Cherry。模型可用性取决于账户权限；可按官方列表填写其他声音 ID。").font(.caption).foregroundStyle(.secondary)
+                Link("查看 Qwen-TTS 接口与音色", destination: URL(string: "https://help.aliyun.com/zh/model-studio/qwen-tts-api")!)
             } else if editor.profile.kind == .cosyVoice {
                 Text("使用阿里云百炼北京地域 API Key，不是 AccessKey。默认使用北京公共地址；业务空间专属地址请填写 https://你的WorkspaceID.cn-beijing.maas.aliyuncs.com/api/v1。").font(.caption).foregroundStyle(.secondary)
                 Text("默认模型 cosyvoice-v3-flash；longanyang 为龙安洋，longanhuan 为龙安欢。自定义音色 ID 必须与所选模型匹配。").font(.caption).foregroundStyle(.secondary)
@@ -177,6 +182,7 @@ struct ServiceSettings: View {
         switch kind {
         case .gemini: profile = .gemini
         case .cosyVoice: profile = .cosyVoice
+        case .qwenTTS: profile = .qwenTTS
         case .openAI: profile = .openAI
         }
         profile.id = UUID().uuidString; profile.name = "新的 " + kind.rawValue + " 服务"

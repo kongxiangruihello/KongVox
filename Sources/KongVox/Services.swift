@@ -47,6 +47,7 @@ struct SpeechClient {
         let path: String
         switch profile.kind {
         case .gemini: path = "/models/\(profile.model):generateContent"
+        case .qwenTTS: path = "/services/aigc/multimodal-generation/generation"
         case .cosyVoice: path = "/services/audio/tts/SpeechSynthesizer"
         case .openAI: path = "/audio/speech"
         }
@@ -61,6 +62,15 @@ struct SpeechClient {
             let part: [String: Any] = profile.modernGemini ? ["text": text, "speech_metadata": ["style": style]] : ["text": "请按以下要求朗读，仅读出正文。\n表达要求：\(style)\n正文：\n\(text)"]
             let voice: [String: Any] = profile.modernGemini ? ["voice": settings.voice] : ["prebuiltVoiceConfig": ["voiceName": settings.voice]]
             body = ["contents": [["role": "user", "parts": [part]]], "generationConfig": ["responseModalities": ["AUDIO"], "speechConfig": ["voiceConfig": voice]]]
+        } else if profile.kind == .qwenTTS {
+            guard text.count <= 600 else { throw VoxError(message: "Qwen-TTS 每段最多 600 字，请拆分段落后重试。") }
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            var input: [String: Any] = ["text": text, "voice": settings.voice, "language_type": "Auto"]
+            if profile.model.hasPrefix("qwen3-tts-instruct-flash") {
+                input["instructions"] = settings.instructions + " 语速目标为正常速度的 \(settings.speed) 倍。"
+                input["optimize_instructions"] = true
+            }
+            body = ["model": profile.model, "input": input]
         } else if profile.kind == .cosyVoice {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             var input: [String: Any] = ["text": text, "voice": settings.voice, "format": "wav", "sample_rate": 24000, "rate": settings.speed]
@@ -84,7 +94,7 @@ struct SpeechClient {
         return request
     }
     func generate(text: String, settings: VoiceSettings, key: String, recoveryFile: URL? = nil) async throws -> Data {
-        if settings.resolvedService.kind == .cosyVoice, let file = recoveryFile,
+        if settings.resolvedService.kind.usesAudioDownload, let file = recoveryFile,
            FileManager.default.fileExists(atPath: file.path) {
             let receipt = try JSONDecoder().decode(DownloadReceipt.self, from: Data(contentsOf: file))
             return try await download(receipt.url, recoveryFile: file)
@@ -95,8 +105,8 @@ struct SpeechClient {
         catch { throw ServiceFailure.network(error, download: false) }
         guard let http = response as? HTTPURLResponse else { throw VoxError(message: "未收到有效响应。") }
         guard (200..<300).contains(http.statusCode) else { throw ServiceFailure.http(http.statusCode, body: data) }
-        if settings.resolvedService.kind == .cosyVoice {
-            if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], json["code"] != nil {
+        if settings.resolvedService.kind.usesAudioDownload {
+            if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let code = json["code"] as? String, !code.isEmpty {
                 throw ServiceFailure.http(http.statusCode, body: data)
             }
             let url = try Self.cosyVoiceAudioURL(data)
@@ -130,19 +140,19 @@ struct SpeechClient {
         catch { throw ServiceFailure(stage: "音频格式异常", category: "audio", hint: "已保留原始音频。请确认服务返回 WAV；重试会使用缓存。若仍失败，可放弃下载缓存后重新生成（可能计费）。") }
     }
     static func cosyVoiceAudioURL(_ data: Data) throws -> URL {
-        guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw VoxError(message: "CosyVoice 返回格式无效。") }
-        guard response["code"] == nil,
+        guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw VoxError(message: "阿里云语音服务返回格式无效。") }
+        guard (response["code"] as? String ?? "").isEmpty,
               let output = response["output"] as? [String: Any],
               output["finish_reason"] as? String == "stop",
               let audio = output["audio"] as? [String: Any], let address = audio["url"] as? String,
-              var components = URLComponents(string: address) else { throw VoxError(message: "CosyVoice 未完整生成音频，请核对北京地域的 API Key、模型与音色是否匹配。") }
+              var components = URLComponents(string: address) else { throw VoxError(message: "阿里云语音服务未完整生成音频，请核对北京地域的 API Key、模型与音色是否匹配。") }
         // Official responses may use HTTP OSS links. Upgrade to TLS without logging the signed query.
         guard let host = components.host?.lowercased(), host.hasSuffix(".oss-cn-beijing.aliyuncs.com"),
               components.user == nil, components.password == nil, components.fragment == nil,
               components.port == nil || components.port == 443,
-              ["https", "http"].contains(components.scheme?.lowercased() ?? "") else { throw VoxError(message: "CosyVoice 返回了不支持的音频下载地址。") }
+              ["https", "http"].contains(components.scheme?.lowercased() ?? "") else { throw VoxError(message: "阿里云语音服务返回了不支持的音频下载地址。") }
         components.scheme = "https"
-        guard let url = components.url else { throw VoxError(message: "CosyVoice 音频地址无效。") }
+        guard let url = components.url else { throw VoxError(message: "阿里云语音服务音频地址无效。") }
         return url
     }
     static func geminiPCM(_ data: Data) throws -> Data {

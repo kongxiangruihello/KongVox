@@ -32,6 +32,16 @@ final class WAVDecoderTests: XCTestCase {
             XCTAssertEqual(try AudioFiles.extractPCM(wav), expected)
         }
     }
+    func testCosyObservedHeader() throws {
+        var wav = Self.fixture()
+        wav.replaceSubrange(4..<8, with: Data([0xbf,0xff,0xff,0x7f]))
+        wav.replaceSubrange(40..<44, with: Data([0x9b,0xff,0xff,0x7f]))
+        XCTAssertEqual(try AudioFiles.extractPCM(wav), try AudioFiles.extractPCM(Self.fixture()))
+        var wrong = wav; wrong[40] = 0x9a
+        XCTAssertThrowsError(try AudioFiles.extractPCM(wrong))
+        wav.removeLast()
+        XCTAssertThrowsError(try AudioFiles.extractPCM(wav))
+    }
     func testNormalization() throws {
         for (rate, channels, bits, floating, extended) in [(48000,2,16,false,false), (22050,1,16,false,false), (24000,1,24,false,false), (24000,1,32,true,false), (24000,2,16,false,true), (24000,1,8,false,false), (24000,1,32,false,false)] {
             let pcm = try AudioFiles.extractPCM(Self.fixture(rate: rate, channels: channels, bits: bits, floating: floating, extended: extended))

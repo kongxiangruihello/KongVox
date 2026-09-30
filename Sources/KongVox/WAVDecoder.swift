@@ -11,13 +11,17 @@ enum WAVDecoder {
         }
         guard data.count >= 44, data.count <= 256 * 1024 * 1024, data.prefix(4) == Data("RIFF".utf8), data[8..<12] == Data("WAVE".utf8) else { throw failure("服务返回的内容不是可识别的 WAV 文件。") }
         let declared = try uint(4, 4)
-        let end = declared == 0 || declared == UInt32.max ? data.count : Int(declared) + 8
+        // Observed CosyVoice streaming WAV header: paired fixed length placeholders.
+        // Match the exact canonical header pair, not arbitrary oversized/truncated WAVs.
+        let initialDataLength = try uint(40, 4)
+        let cosyStreaming = declared == 0x7fffffbf && data[36..<40] == Data("data".utf8) && initialDataLength == 0x7fffff9b
+        let end = declared == 0 || declared == UInt32.max || cosyStreaming ? data.count : Int(declared) + 8
         guard end <= data.count, end >= 44 else { throw failure("音频下载不完整。") }
         var offset = 12, format: Data?, samples = Data()
         while offset + 8 <= end {
             let name = String(decoding: data[offset..<offset + 4], as: UTF8.self)
             let rawSize = try uint(offset + 4, 4), start = offset + 8
-            let streamingData = name == "data" && (rawSize == 0 || rawSize == UInt32.max)
+            let streamingData = name == "data" && (rawSize == 0 || rawSize == UInt32.max || (cosyStreaming && offset == 36 && rawSize == 0x7fffff9b))
             let size = streamingData ? end - start : Int(rawSize)
             guard size <= end - start else { throw failure("音频数据块被截断。") }
             if name == "fmt " {

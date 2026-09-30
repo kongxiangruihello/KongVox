@@ -6,7 +6,7 @@ struct ServiceFailure: LocalizedError {
     let hint: String
     var status: Int? = nil
     var errorDescription: String? { "\(stage)：\(hint)" }
-    var report: String { "KongVox 0.3\n阶段：\(stage)\n分类：\(category)\nHTTP：\(status.map(String.init) ?? "无")\n建议：\(hint)" }
+    var report: String { "KongVox 0.3.1\n阶段：\(stage)\n分类：\(category)\nHTTP：\(status.map(String.init) ?? "无")\n建议：\(hint)" }
     static func http(_ status: Int, body: Data, download: Bool = false) -> ServiceFailure {
         if download {
             return Self(stage: "音频下载失败", category: "download", hint: status == 403 || status == 404 ? "下载链接可能已过期。可先重试；仍失败时选择「放弃下载缓存」，再重新生成（可能计费）。" : "生成结果已保留，请检查网络后继续下载。", status: status)
@@ -36,7 +36,7 @@ struct ServiceFailure: LocalizedError {
     }
     static func report(_ error: Error) -> String {
         // Never copy response bodies, URLs, keys, user text or arbitrary NSError descriptions.
-        (error as? ServiceFailure)?.report ?? "KongVox 0.3\n分类：本地配置或音频处理\n请核对界面提示。诊断未包含文稿、密钥或下载链接。"
+        (error as? ServiceFailure)?.report ?? "KongVox 0.3.1\n分类：本地配置或音频处理\n请核对界面提示。诊断未包含文稿、密钥或下载链接。"
     }
 }
 

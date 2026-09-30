@@ -77,6 +77,38 @@ final class Version03Tests: XCTestCase {
         try Data("broken".utf8).write(to: two)
         XCTAssertThrowsError(try Subtitles.render(texts: ["第一段", "第二段"], audio: [one, two], pause: 0))
     }
+    @MainActor func testQwenModelsAndMigration() async throws {
+        var settings = VoiceSettings(); settings.service = .qwenTTS; settings.voice = "Cherry"
+        let client = CosyVoiceTests().client()
+        for model in ServiceProfile.qwenTTS.modelPresets {
+            settings.service?.model = model
+            let request = try client.request(text: "测试", settings: settings, key: "fixture")
+            XCTAssertEqual(request.url?.path, "/api/v1/services/aigc/multimodal-generation/generation")
+            let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
+            let input = body["input"] as! [String: Any]
+            XCTAssertEqual(input["voice"] as? String, "Cherry")
+            XCTAssertEqual(input["language_type"] as? String, "Auto")
+            XCTAssertEqual(input["instructions"] != nil, model.contains("instruct"))
+        }
+        XCTAssertThrowsError(try client.request(text: String(repeating: "字", count: 601), settings: settings, key: "fixture"))
+        let response = Data(#"{"code":"","output":{"finish_reason":"stop","audio":{"url":"https://bucket.oss-cn-beijing.aliyuncs.com/a.wav"}}}"#.utf8)
+        XCTAssertEqual(try SpeechClient.cosyVoiceAudioURL(response).host, "bucket.oss-cn-beijing.aliyuncs.com")
+        let dir = try temporary(); defer { try? FileManager.default.removeItem(at: dir) }
+        var old = ServiceCatalog(); old.builtinsRevision = 1; old.profiles.removeAll { $0.kind == .qwenTTS }
+        try JSONEncoder().encode(old).write(to: dir.appendingPathComponent("services.json"))
+        let studio = Studio(root: dir, client: client, keyProvider: { _ in "fixture" })
+        XCTAssertEqual(studio.catalog.profiles.filter { $0.kind == .qwenTTS }.count, 1)
+        XCTAssertEqual(studio.catalog.defaultID, old.defaultID)
+        studio.selectService(ServiceProfile.qwenTTS.id)
+        studio.edit { $0.draft = String(repeating: "字", count: 1100) }
+        studio.importDraft()
+        XCTAssertEqual(studio.project?.segments.count, 3)
+        XCTAssertTrue(studio.project!.segments.allSatisfy { $0.text.count <= 500 })
+        CosyProtocol.requests = []; CosyProtocol.downloadStatus = 200
+        studio.generate(); await studio.task?.value
+        XCTAssertEqual(try studio.currentURLs().count, 3)
+        XCTAssertEqual(CosyProtocol.requests.filter { $0.httpMethod == "POST" }.count, 3)
+    }
     func testSafeDiagnostics() throws {
         for (status, code, category) in [(401,"InvalidApiKey","credentials"),(400,"InvalidParameter","configuration"),(429,"insufficient_quota","quota"),(429,"RateLimit","rate_or_quota"),(403,"Forbidden","permission")] {
             let body = try JSONSerialization.data(withJSONObject: ["code": code, "message": "SECRET 文稿 https://example.com/?Signature=SECRET"])

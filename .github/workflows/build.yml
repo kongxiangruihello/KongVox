@@ -14,4 +14,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: KongVox-Mac
-          path: dist/KongVox-0.3-Mac.zip
+          path: dist/KongVox-0.3.1-Mac.zip

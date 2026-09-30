@@ -199,7 +199,16 @@ final class SpeechTests: XCTestCase {
         try await release.testStudioResumeAndIsolation()
         try release.testSubtitlesTimingAndValidation()
         try release.testSafeDiagnostics()
-        print("PASS: 28 test groups; persistent download recovery, safe diagnostics, SRT timing; WAV streaming headers and normalization; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
+        try wav.testCosyObservedHeader()
+        try await release.testQwenModelsAndMigration()
+        if let directory = ProcessInfo.processInfo.environment["KONGVOX_VERIFY_WAV_DIR"] {
+            let files = try FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: directory), includingPropertiesForKeys: nil).filter { $0.pathExtension == "wav" }
+            for file in files {
+                let pcm = try AudioFiles.extractPCM(Data(contentsOf: file))
+                print("Real cached WAV verified: \(pcm.count / 2) frames, \(Double(pcm.count) / 48000) seconds")
+            }
+        }
+        print("PASS: 30 test groups; observed CosyVoice header and Qwen models/migration; persistent download recovery, safe diagnostics, SRT timing; WAV streaming headers and normalization; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
     }
 }
 #endif

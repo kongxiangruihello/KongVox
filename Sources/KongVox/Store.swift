@@ -35,6 +35,11 @@ import UniformTypeIdentifiers
                     try JSONEncoder().encode(catalog).write(to: servicesFile, options: .atomic)
                 }
             }
+            if (catalog.builtinsRevision ?? 0) < 2 {
+                if !catalog.profiles.contains(where: { $0.id == ServiceProfile.qwenTTS.id }) { catalog.profiles.append(.qwenTTS) }
+                catalog.builtinsRevision = 2
+                try JSONEncoder().encode(catalog).write(to: servicesFile, options: .atomic)
+            }
             let file = self.root.appendingPathComponent("projects.json")
             if FileManager.default.fileExists(atPath: file.path) {
                 projects = try JSONDecoder().decode([Project].self, from: Data(contentsOf: file))
@@ -108,7 +113,7 @@ import UniformTypeIdentifiers
     }
     func importDraft() {
         edit { p in
-            p.segments.append(contentsOf: TextSplitter.split(p.draft).map { Segment(text: $0) })
+            p.segments.append(contentsOf: TextSplitter.split(p.draft, limit: p.settings.resolvedService.kind == .qwenTTS ? 500 : 700).map { Segment(text: $0) })
             p.draft = ""
         }
     }

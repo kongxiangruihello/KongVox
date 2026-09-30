@@ -1,6 +1,16 @@
-# KongVox 0.3
+# KongVox 0.3.1
 
 个人使用的原生 macOS 配音工作台，面向短视频口播与长文章。SwiftUI 编写，无第三方 Swift 依赖。
+
+## 0.3.1：修复实际 CosyVoice 返回格式，加入 Qwen-TTS
+
+- 已用两份实际失败缓存定位：24 kHz 单声道 PCM16 的 RIFF/data 长度分别为 `0x7fffffbf` / `0x7fffff9b`，是未回填的流式占位长度。本版仅识别此确定的配对格式，继续拒绝一般截断文件。原有失败缓存可直接继续处理，无需放弃缓存重新合成。
+- 新增「阿里云 Qwen-TTS」服务，支持 `qwen3-tts-flash` 和 `qwen3-tts-instruct-flash`。默认 Cherry 音色，需在新服务中保存百炼北京地域 API Key，旧密钥不会自动复制。
+- 服务设置统一提供「选择模型预设」，CosyVoice 可选 v3-flash / v3-plus；也可手填其他兼容模型。当前 CosyVoice v3-plus 适配仅发送文本、音色、格式和语速，不发送表达指令。
+- Qwen 标准 Flash 不应用表达和语速设置；Instruct Flash 通过自然语言提示表达和语速，不保证精确倍速。每段最多 600 字；选用 Qwen 后，新导入文稿按最多 500 字拆分，已有超长段落需手工拆分。支持北京域名音频下载及失败缓存恢复。
+- 新增服务不改变已有项目或默认服务。Qwen 模型可用性需由实际账户验证。
+
+接口与声音依据：[Qwen-TTS 官方接口](https://help.aliyun.com/en/model-studio/qwen-tts-api)、[CosyVoice 音色列表](https://help.aliyun.com/en/model-studio/cosyvoice-voice-list)。
 
 ## 0.3：恢复下载、服务诊断、字幕导出
 
@@ -81,10 +91,10 @@ macOS 13+，Swift 5.9+ / Xcode Command Line Tools。
 swift test  # 完整 Xcode 环境
 # 仅有 Command Line Tools：bash scripts/test-core.sh
 bash scripts/build-app.sh
-open dist/KongVox-0.3/KongVox.app
+open dist/KongVox-0.3.1/KongVox.app
 ```
 
-产出 `dist/KongVox-0.3/KongVox.app` 与 `dist/KongVox-0.3-Mac.zip`，按当前 Mac 架构构建。本地交付为 Apple Silicon 版本，使用 ad-hoc 签名，尚未 Developer ID 公证。
+产出 `dist/KongVox-0.3.1/KongVox.app` 与 `dist/KongVox-0.3.1-Mac.zip`，按当前 Mac 架构构建。本地交付为 Apple Silicon 版本，使用 ad-hoc 签名，尚未 Developer ID 公证。
 
 ## 数据
 
