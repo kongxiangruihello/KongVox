@@ -183,7 +183,13 @@ final class SpeechTests: XCTestCase {
         try services.testLegacyMigration()
         try services.testServicePersistenceAndSnapshots()
         try await services.testGeminiQueue()
-        print("PASS: 15 test groups; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
+        let cosy = CosyVoiceTests()
+        try cosy.testRequest()
+        try cosy.testSignedAudioURL()
+        try await cosy.testRoundTrip()
+        try await cosy.testDownloadFailure()
+        try cosy.testCatalogUpgrade()
+        print("PASS: 20 test groups; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
     }
 }
 #endif

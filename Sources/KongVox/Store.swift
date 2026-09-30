@@ -26,7 +26,14 @@ import UniformTypeIdentifiers
         do {
             try FileManager.default.createDirectory(at: self.root.appendingPathComponent("Audio"), withIntermediateDirectories: true)
             let servicesFile = self.root.appendingPathComponent("services.json")
-            if FileManager.default.fileExists(atPath: servicesFile.path) { catalog = try JSONDecoder().decode(ServiceCatalog.self, from: Data(contentsOf: servicesFile)) }
+            if FileManager.default.fileExists(atPath: servicesFile.path) {
+                catalog = try JSONDecoder().decode(ServiceCatalog.self, from: Data(contentsOf: servicesFile))
+                if catalog.builtinsRevision == nil {
+                    if !catalog.profiles.contains(where: { $0.id == ServiceProfile.cosyVoice.id }) { catalog.profiles.append(.cosyVoice) }
+                    catalog.builtinsRevision = 1
+                    try JSONEncoder().encode(catalog).write(to: servicesFile, options: .atomic)
+                }
+            }
             let file = self.root.appendingPathComponent("projects.json")
             if FileManager.default.fileExists(atPath: file.path) {
                 projects = try JSONDecoder().decode([Project].self, from: Data(contentsOf: file))

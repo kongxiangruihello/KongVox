@@ -44,7 +44,12 @@ struct SpeechClient {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 3000, text.utf8.count <= 12000 else { throw VoxError(message: "朗读文本为空或过长，请拆成更短的段落。") }
         guard profile.voices.contains(settings.voice) else { throw VoxError(message: "当前声音不在服务的声音列表中，请重新选择。") }
         guard settings.speed.isFinite, (0.7...1.3).contains(settings.speed) else { throw VoxError(message: "语速超出支持范围。") }
-        let path = profile.kind == .gemini ? "/models/\(profile.model):generateContent" : "/audio/speech"
+        let path: String
+        switch profile.kind {
+        case .gemini: path = "/models/\(profile.model):generateContent"
+        case .cosyVoice: path = "/services/audio/tts/SpeechSynthesizer"
+        case .openAI: path = "/audio/speech"
+        }
         guard let url = URL(string: profile.normalizedURL + path) else { throw VoxError(message: "服务地址无效。") }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"; request.timeoutInterval = 180
@@ -56,6 +61,19 @@ struct SpeechClient {
             let part: [String: Any] = profile.modernGemini ? ["text": text, "speech_metadata": ["style": style]] : ["text": "请按以下要求朗读，仅读出正文。\n表达要求：\(style)\n正文：\n\(text)"]
             let voice: [String: Any] = profile.modernGemini ? ["voice": settings.voice] : ["prebuiltVoiceConfig": ["voiceName": settings.voice]]
             body = ["contents": [["role": "user", "parts": [part]]], "generationConfig": ["responseModalities": ["AUDIO"], "speechConfig": ["voiceConfig": voice]]]
+        } else if profile.kind == .cosyVoice {
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            var input: [String: Any] = ["text": text, "voice": settings.voice, "format": "wav", "sample_rate": 24000, "rate": settings.speed]
+            if profile.model == "cosyvoice-v3-flash" || profile.model.hasPrefix("cosyvoice-v3.5-") {
+                let direction = settings.direction.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !direction.isEmpty { input["instruction"] = direction }
+                else if settings.voice == "longanyang" {
+                    input["instruction"] = settings.mode == "长文章" ? "你现在说话的角色是一个旁白，你说话的情感是neutral。" : "你正在进行闲聊互动，你说话的情感是neutral。"
+                } else if settings.voice == "longanhuan" {
+                    input["instruction"] = settings.mode == "长文章" ? "你正在进行深夜电台广播，你说话的情感是neutral。" : "你正在进行闲聊对话，你说话的情感是neutral。"
+                }
+            }
+            body = ["model": profile.model, "input": input]
         } else {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             var speech: [String: Any] = ["model": profile.model, "voice": settings.voice, "input": text, "speed": settings.speed, "response_format": "pcm"]
@@ -83,8 +101,33 @@ struct SpeechClient {
             }
             throw VoxError(message: message)
         }
+        if settings.resolvedService.kind == .cosyVoice {
+            let url = try Self.cosyVoiceAudioURL(data)
+            // A fresh request intentionally excludes the service API key from the signed audio URL download.
+            var download = URLRequest(url: url); download.timeoutInterval = 120
+            let (audio, audioResponse) = try await session.data(for: download)
+            try Task.checkCancellation()
+            guard let status = audioResponse as? HTTPURLResponse, (200..<300).contains(status.statusCode) else { throw VoxError(message: "配音已生成，但音频下载失败。请检查网络后重试。") }
+            return try AudioFiles.extractPCM(audio)
+        }
         if settings.resolvedService.kind == .gemini { return try Self.geminiPCM(data) }
         return try Self.audioPCM(data, mime: http.value(forHTTPHeaderField: "Content-Type") ?? "")
+    }
+    static func cosyVoiceAudioURL(_ data: Data) throws -> URL {
+        guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw VoxError(message: "CosyVoice 返回格式无效。") }
+        guard response["code"] == nil,
+              let output = response["output"] as? [String: Any],
+              output["finish_reason"] as? String == "stop",
+              let audio = output["audio"] as? [String: Any], let address = audio["url"] as? String,
+              var components = URLComponents(string: address) else { throw VoxError(message: "CosyVoice 未完整生成音频，请核对北京地域的 API Key、模型与音色是否匹配。") }
+        // Official responses may use HTTP OSS links. Upgrade to TLS without logging the signed query.
+        guard let host = components.host?.lowercased(), host.hasSuffix(".oss-cn-beijing.aliyuncs.com"),
+              components.user == nil, components.password == nil, components.fragment == nil,
+              components.port == nil || components.port == 443,
+              ["https", "http"].contains(components.scheme?.lowercased() ?? "") else { throw VoxError(message: "CosyVoice 返回了不支持的音频下载地址。") }
+        components.scheme = "https"
+        guard let url = components.url else { throw VoxError(message: "CosyVoice 音频地址无效。") }
+        return url
     }
     static func geminiPCM(_ data: Data) throws -> Data {
         guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw VoxError(message: "Gemini 返回格式无效。") }

@@ -33,7 +33,7 @@ struct StudioView: View {
                     }
                 }.listStyle(.sidebar).disabled(studio.busy)
                 Button { state.showSettings = true } label: { Label("服务设置", systemImage: "key") }.disabled(studio.busy)
-                Text("KongVox 0.2 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
+                Text("KongVox 0.2.1 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
             }.padding(18).navigationSplitViewColumnWidth(230)
         } detail: {
             VStack(spacing: 0) {
@@ -95,6 +95,9 @@ struct StudioView: View {
             }
             VStack(alignment: .leading, spacing: 8) {
                 Text("表达要求")
+                if p.settings.resolvedService.kind == .cosyVoice {
+                    Text("CosyVoice 指令需符合音色要求，例如：你说话的情感是happy。留空使用预设；不支持指令的模型仅使用声音和语速。").font(.caption2).foregroundStyle(.secondary)
+                }
                 TextField("例如：像朋友聊天，重点轻微强调", text: bind(\.settings.direction, fallback: ""), axis: .vertical).lineLimit(3...6)
             }
             Picker("段间停顿", selection: bind(\.settings.pause, fallback: 0.35)) { Text("紧凑 · 0.15 秒").tag(0.15); Text("标准 · 0.35 秒").tag(0.35); Text("舒缓 · 0.7 秒").tag(0.7) }

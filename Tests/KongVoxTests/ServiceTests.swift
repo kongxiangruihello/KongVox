@@ -111,7 +111,7 @@ final class ServiceTests: XCTestCase {
         XCTAssertEqual(studio.project?.settings.resolvedService.model, "new-model")
         let restored = Studio(root: dir)
         XCTAssertEqual(restored.catalog.defaultID, "custom")
-        XCTAssertEqual(restored.catalog.profiles.count, 3)
+        XCTAssertEqual(restored.catalog.profiles.count, 4)
         let saved = try String(contentsOf: dir.appendingPathComponent("services.json"), encoding: .utf8)
         XCTAssertFalse(saved.contains("API Key"))
     }

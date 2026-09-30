@@ -1,6 +1,23 @@
-# KongVox 0.2
+# KongVox 0.2.1
 
 个人使用的原生 macOS 配音工作台，面向短视频口播与长文章。SwiftUI 编写，无第三方 Swift 依赖。
+
+## 0.2.1：阿里云 CosyVoice
+
+已加入阿里云百炼 CosyVoice 原生 HTTP 接口。升级后自动补充服务入口，不改变现有默认服务或项目选择。
+
+1. 打开「服务设置 → 阿里云 CosyVoice」。
+2. 填入**阿里云百炼北京地域 API Key**（不是阿里云 AccessKey，也不是智能语音交互产品的临时 Token）。
+3. 默认模型 `cosyvoice-v3-flash`；默认音色 `longanyang`（龙安洋）、`longanhuan`（龙安欢）。
+4. 点击「测试并试听」后保存。在项目右侧选择该服务再生成。
+
+默认基础地址为 `https://dashscope.aliyuncs.com/api/v1`。使用业务空间专属域名时，填写 `https://你的WorkspaceID.cn-beijing.maas.aliyuncs.com/api/v1`；应用自动拼接 `/services/audio/tts/SpeechSynthesizer`。本版 HTTP 适配针对北京地域。
+
+支持填写自有音色 ID 和模型，音色必须与模型匹配。`cosyvoice-v3.5-*` 需要对应的自定义音色，不能直接沿用系统音色。CosyVoice 表达要求直接用作 `instruction`，需遵守具体音色的格式（例如 `你说话的情感是happy。`）。两个默认音色在未填写指令时使用适合口播/长文的预设。v3-plus/v2 不发送表达指令。
+
+应用请求 24 kHz WAV，收到成功结果后立即通过 HTTPS 下载到本地。下载请求不携带 API Key。若合成成功但下载失败，重新生成可能再次计费。未进行真实 CosyVoice 付费调用，账户权限及实际音质需你自行试听。
+
+参考：[CosyVoice HTTP API](https://help.aliyun.com/zh/model-studio/cosyvoice-tts-http-api)、[音色与指令格式](https://help.aliyun.com/zh/model-studio/cosyvoice-voice-list)。
 
 ## 0.2 新增
 
@@ -50,10 +67,10 @@ macOS 13+，Swift 5.9+ / Xcode Command Line Tools。
 swift test  # 完整 Xcode 环境
 # 仅有 Command Line Tools：bash scripts/test-core.sh
 bash scripts/build-app.sh
-open dist/KongVox-0.2.0/KongVox.app
+open dist/KongVox-0.2.1/KongVox.app
 ```
 
-产出 `dist/KongVox-0.2.0/KongVox.app` 与 `dist/KongVox-0.2.0-Mac.zip`，按当前 Mac 架构构建。本地交付为 Apple Silicon 版本，使用 ad-hoc 签名，尚未 Developer ID 公证。
+产出 `dist/KongVox-0.2.1/KongVox.app` 与 `dist/KongVox-0.2.1-Mac.zip`，按当前 Mac 架构构建。本地交付为 Apple Silicon 版本，使用 ad-hoc 签名，尚未 Developer ID 公证。
 
 ## 数据
 
@@ -69,7 +86,7 @@ open dist/KongVox-0.2.0/KongVox.app
 
 ## 验证与限制
 
-15 组本地测试通过，覆盖 Gemini 新旧请求、WAV/PCM 解析、异常响应、服务切换、凭据隔离、旧项目恢复、长文队列续接/取消、音频合并与 M4A 导出。使用模拟 HTTP，不调用真实付费服务。
+20 组本地测试通过，覆盖 Gemini 新旧请求、WAV/PCM 解析、异常响应、服务切换、凭据隔离、旧项目恢复、长文队列续接/取消、音频合并与 M4A 导出。使用模拟 HTTP，不调用真实付费服务。
 
 真实云端配音、账户权限、声音自然度和 MP3 编码尚需配置后验证。本版聚焦 Gemini 与多 API 管理，不包含发音词典、A/B 对比面板或章节编辑。
 

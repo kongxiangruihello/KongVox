@@ -31,7 +31,7 @@ import AVFoundation
             let service = try value()
             let token = key.trimmingCharacters(in: .whitespacesAndNewlines)
             let secret = token.isEmpty && !removeKey ? try KeyStore.read(account: service.keyAccount) : token
-            guard !secret.isEmpty else { throw VoxError(message: "请填写 API Key；Google 项目 ID 不能用作密钥。") }
+            guard !secret.isEmpty else { throw VoxError(message: "请填写该服务的 API Key。") }
             var settings = VoiceSettings(); settings.service = service; settings.voice = testVoice
             let text = testText
             // Validate before presenting a loading state or making a billable request.
@@ -76,6 +76,7 @@ struct ServiceSettings: View {
                     Divider()
                     Menu("添加服务") {
                         Button("Gemini 原生") { add(.gemini) }
+                        Button("阿里云 CosyVoice") { add(.cosyVoice) }
                         Button("OpenAI 兼容 API") { add(.openAI) }
                     }
                     Text("切换前请保存当前修改。").font(.caption2).foregroundStyle(.secondary)
@@ -131,6 +132,10 @@ struct ServiceSettings: View {
                     ForEach(["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts", "gemini-3.1-flash-tts-preview", "gemini-2.5-pro-preview-tts"], id: \.self) { model in Button(model) { editor.profile.model = model } }
                 }.fixedSize()
                 Text("使用 Google AI Studio API Key；gen-lang-client-… 是项目 ID，不能用作密钥。模型可用性取决于你的账户。").font(.caption).foregroundStyle(.secondary)
+            } else if editor.profile.kind == .cosyVoice {
+                Text("使用阿里云百炼北京地域 API Key，不是 AccessKey。默认使用北京公共地址；业务空间专属地址请填写 https://你的WorkspaceID.cn-beijing.maas.aliyuncs.com/api/v1。").font(.caption).foregroundStyle(.secondary)
+                Text("默认模型 cosyvoice-v3-flash；longanyang 为龙安洋，longanhuan 为龙安欢。自定义音色 ID 必须与所选模型匹配。").font(.caption).foregroundStyle(.secondary)
+                Link("查看官方模型与音色", destination: URL(string: "https://help.aliyun.com/zh/model-studio/cosyvoice-voice-list")!)
             } else {
                 Text("兼容 /audio/speech；需支持 24 kHz、单声道、16-bit PCM 或 WAV 返回。").font(.caption).foregroundStyle(.secondary)
             }
@@ -142,8 +147,13 @@ struct ServiceSettings: View {
         }
     }
     func add(_ kind: ServiceKind) {
-        var profile = kind == .gemini ? ServiceProfile.gemini : .openAI
-        profile.id = UUID().uuidString; profile.name = kind == .gemini ? "新的 Gemini 服务" : "新的兼容服务"
+        var profile: ServiceProfile
+        switch kind {
+        case .gemini: profile = .gemini
+        case .cosyVoice: profile = .cosyVoice
+        case .openAI: profile = .openAI
+        }
+        profile.id = UUID().uuidString; profile.name = "新的 " + kind.rawValue + " 服务"
         editor.load(profile, defaultID: studio.catalog.defaultID)
     }
     func save() {

@@ -4,6 +4,7 @@ import CryptoKit
 enum ServiceKind: String, Codable, CaseIterable, Identifiable {
     case openAI = "OpenAI 兼容"
     case gemini = "Gemini 原生"
+    case cosyVoice = "阿里云 CosyVoice"
     var id: String { rawValue }
 }
 struct ServiceProfile: Codable, Equatable, Identifiable {
@@ -16,6 +17,7 @@ struct ServiceProfile: Codable, Equatable, Identifiable {
     var enabled = true
     static let openAI = ServiceProfile(id: "openai", name: "OpenAI", kind: .openAI, baseURL: "https://api.openai.com/v1", model: "gpt-4o-mini-tts", voices: ["marin", "cedar", "coral", "sage", "alloy"])
     static let gemini = ServiceProfile(id: "gemini", name: "Gemini", kind: .gemini, baseURL: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-3.8-flash-tts", voices: ["Kore", "Puck", "Charon", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr"])
+    static let cosyVoice = ServiceProfile(id: "aliyun-cosyvoice", name: "阿里云 CosyVoice", kind: .cosyVoice, baseURL: "https://dashscope.aliyuncs.com/api/v1", model: "cosyvoice-v3-flash", voices: ["longanyang", "longanhuan"])
     var normalizedURL: String { baseURL.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
     var signature: String { [id, kind.rawValue, normalizedURL, model].joined(separator: "\u{0}") }
     var keyAccount: String {
@@ -40,6 +42,7 @@ struct ServiceProfile: Codable, Equatable, Identifiable {
     }
 }
 struct ServiceCatalog: Codable {
-    var profiles: [ServiceProfile] = [.openAI, .gemini]
+    var builtinsRevision: Int? = 1
+    var profiles: [ServiceProfile] = [.openAI, .gemini, .cosyVoice]
     var defaultID = "gemini"
 }
