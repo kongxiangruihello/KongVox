@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
     @Published var activeSegment: UUID?
     @Published var status = "准备好，让文字开口。"
     @Published var error: String?
+    @Published var diagnostic = ""
     @Published var playing = false
     @Published var progress = 0.0
     let root: URL
@@ -115,6 +116,22 @@ import UniformTypeIdentifiers
     func ready(_ segment: Segment, settings: VoiceSettings) -> Bool {
         segment.ready(settings) && segment.current.map { FileManager.default.fileExists(atPath: audioURL($0).path) } == true
     }
+    func recoveryFile(_ segment: Segment, project: Project) -> URL {
+        root.appendingPathComponent("Recovery").appendingPathComponent("\(project.id)-\(segment.id)-\(segment.fingerprint(project.settings)).json")
+    }
+    func hasRecovery(_ segment: Segment) -> Bool {
+        guard let p = project else { return false }
+        return FileManager.default.fileExists(atPath: recoveryFile(segment, project: p).path)
+    }
+    func discardRecovery(_ segment: Segment) {
+        guard !busy, let p = project else { return }
+        do { try DownloadReceipt.clear(recoveryFile(segment, project: p)); status = "已放弃该段下载缓存，下次生成会重新请求服务。" }
+        catch { self.error = "无法清除下载缓存，请检查本地文件权限。" }
+    }
+    func copyDiagnostic() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(diagnostic, forType: .string)
+    }
     func generate(only: UUID? = nil) {
         guard !busy, storageAvailable, let snapshot = project else { return }
         let pending = snapshot.segments.filter { only == nil ? !ready($0, settings: snapshot.settings) : $0.id == only }
@@ -122,18 +139,20 @@ import UniformTypeIdentifiers
         let service = snapshot.settings.resolvedService
         guard let saved = catalog.profiles.first(where: { $0.id == service.id }), saved.enabled else { error = "该服务已停用，请在声音工作台切换或在服务设置中启用。"; return }
         guard saved == service else { error = "服务配置已更新，请在声音工作台点击「应用最新服务配置」，确认后再生成。"; return }
-        let key: String
-        do { key = try keyProvider(service); guard !key.isEmpty else { throw VoxError(message: "请先打开服务设置，保存 API Key。") } }
-        catch { self.error = error.localizedDescription; return }
-        stop(); busy = true; progress = 0
+        stop(); busy = true; progress = 0; diagnostic = ""
         task = Task {
             defer { busy = false; activeSegment = nil; task = nil }
+            var generationKey: String?
             for (offset, segment) in pending.enumerated() {
                 do {
                     try Task.checkCancellation()
                     activeSegment = segment.id
-                    status = "正在生成 \(offset + 1) / \(pending.count) 段…"
-                    let pcm = try await client.generate(text: segment.spokenText, settings: snapshot.settings, key: key)
+                    let recovery = recoveryFile(segment, project: snapshot)
+                    let resume = FileManager.default.fileExists(atPath: recovery.path)
+                    status = "\(resume ? "正在恢复下载" : "正在生成") \(offset + 1) / \(pending.count) 段…"
+                    if !resume && generationKey == nil { generationKey = try keyProvider(service) }
+                    let key = resume ? "" : generationKey ?? ""
+                    let pcm = try await client.generate(text: segment.spokenText, settings: snapshot.settings, key: key, recoveryFile: recovery)
                     try Task.checkCancellation()
                     let take = Take(file: "\(UUID().uuidString).wav", fingerprint: segment.fingerprint(snapshot.settings), service: service, settings: snapshot.settings, spokenText: segment.spokenText)
                     try AudioFiles.writePCM(pcm, to: audioURL(take))
@@ -141,10 +160,11 @@ import UniformTypeIdentifiers
                     projects[pi].segments[si].takes.insert(take, at: 0)
                     projects[pi].segments[si].selectedTake = take.id
                     guard save() else { status = "保存失败，已停止后续生成。"; return }
+                    try? DownloadReceipt.clear(recovery)
                     progress = Double(offset + 1) / Double(pending.count)
                 } catch {
                     if Task.isCancelled { status = "已取消，完成的段落已保存。" }
-                    else { self.error = error.localizedDescription; status = "生成已暂停，点击生成即可继续未完成段落。" }
+                    else { diagnostic = ServiceFailure.report(error); self.error = error.localizedDescription; status = "生成已暂停，点击生成即可继续未完成段落。" }
                     return
                 }
             }
@@ -194,6 +214,19 @@ import UniformTypeIdentifiers
     }
     static var ffmpeg: URL? {
         ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"].first { FileManager.default.isExecutableFile(atPath: $0) }.map { URL(fileURLWithPath: $0) }
+    }
+    func exportSubtitles() {
+        guard !busy, let p = project else { return }
+        do {
+            let content = try Subtitles.render(texts: p.segments.map(\.text), audio: currentURLs(), pause: p.settings.pause)
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [UTType(filenameExtension: "srt") ?? .plainText]
+            panel.nameFieldStringValue = p.title + ".srt"
+            guard panel.runModal() == .OK, let destination = panel.url else { return }
+            try content.write(to: destination, atomically: true, encoding: .utf8)
+            status = "已导出段落字幕：\(destination.lastPathComponent)；请搭配当前版本的完整音频。"
+            NSWorkspace.shared.activateFileViewerSelecting([destination])
+        } catch { self.error = error.localizedDescription }
     }
     func export(format: String) {
         guard !busy else { return }

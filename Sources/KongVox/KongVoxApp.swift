@@ -33,7 +33,7 @@ struct StudioView: View {
                     }
                 }.listStyle(.sidebar).disabled(studio.busy)
                 Button { state.showSettings = true } label: { Label("服务设置", systemImage: "key") }.disabled(studio.busy)
-                Text("KongVox 0.2.2 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
+                Text("KongVox 0.3 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
             }.padding(18).navigationSplitViewColumnWidth(230)
         } detail: {
             VStack(spacing: 0) {
@@ -67,7 +67,7 @@ struct StudioView: View {
         .tint(.indigo)
         .sheet(isPresented: $state.showSettings) { ServiceSettings().environmentObject(studio) }
         .onChange(of: studio.selected) { _ in studio.stop() }
-        .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil } } message: { Text(studio.error ?? "") }
+        .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil }; if !studio.diagnostic.isEmpty { Button("复制诊断") { studio.copyDiagnostic(); studio.error = nil } } } message: { Text(studio.error ?? "") }
     }
     func bind<T>(_ key: WritableKeyPath<Project,T>, fallback: T) -> Binding<T> {
         Binding(get: { studio.project?[keyPath: key] ?? fallback }, set: { value in studio.edit { $0[keyPath: key] = value } })
@@ -123,6 +123,8 @@ struct StudioView: View {
                 if studio.activeSegment != nil { Button("取消生成") { studio.cancel() } }
             } else {
                 Menu("导出音频") {
+                    Button("SRT · 段落字幕") { studio.exportSubtitles() }
+                    Divider()
                     Button("WAV · 无损剪辑") { studio.export(format: "wav") }
                     Button("M4A · 小体积") { studio.export(format: "m4a") }
                     Button(Studio.ffmpeg == nil ? "MP3 · 需安装 FFmpeg" : "MP3 · 通用分享") { studio.export(format: "mp3") }.disabled(Studio.ffmpeg == nil)
@@ -132,7 +134,9 @@ struct StudioView: View {
         }.padding(18)
     }
 }
+@MainActor final class SegmentControls: ObservableObject { @Published var discardCache = false }
 struct SegmentCard: View {
+    @StateObject private var controls = SegmentControls()
     @EnvironmentObject var studio: Studio
     let index: Int
     let segment: Segment
@@ -156,7 +160,8 @@ struct SegmentCard: View {
                 Text("此版本：\(service.name) · \(service.model) · \(take.settings?.voice ?? "")").font(.caption2).foregroundStyle(.secondary)
             }
             HStack {
-                Button(segment.current == nil ? "生成并试听" : "重新生成") { studio.generate(only: segment.id) }
+                if studio.hasRecovery(segment) { Button("放弃下载缓存") { controls.discardCache = true } }
+                Button(studio.hasRecovery(segment) ? "继续下载" : segment.current == nil ? "生成并试听" : "重新生成") { studio.generate(only: segment.id) }
                 if let take = segment.current {
                     Button("试听此版本") { studio.play(studio.audioURL(take)) }
                     Menu("历史 · \(segment.takes.count) 版") {
@@ -169,6 +174,9 @@ struct SegmentCard: View {
                 }
                 Spacer()
             }.controlSize(.small)
-        }.padding(18).background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 14)).overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
+        }.confirmationDialog("放弃已生成的下载结果？", isPresented: $controls.discardCache) {
+            Button("放弃缓存", role: .destructive) { studio.discardRecovery(segment) }
+        } message: { Text("之后点击生成将重新请求服务，可能再次计费。") }
+        .padding(18).background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 14)).overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
     }
 }

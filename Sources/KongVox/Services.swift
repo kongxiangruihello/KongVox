@@ -83,35 +83,51 @@ struct SpeechClient {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
     }
-    func generate(text: String, settings: VoiceSettings, key: String) async throws -> Data {
+    func generate(text: String, settings: VoiceSettings, key: String, recoveryFile: URL? = nil) async throws -> Data {
+        if settings.resolvedService.kind == .cosyVoice, let file = recoveryFile,
+           FileManager.default.fileExists(atPath: file.path) {
+            let receipt = try JSONDecoder().decode(DownloadReceipt.self, from: Data(contentsOf: file))
+            return try await download(receipt.url, recoveryFile: file)
+        }
         let request = try request(text: text, settings: settings, key: key)
-        let (data, response) = try await session.data(for: request)
-        try Task.checkCancellation()
+        let data: Data, response: URLResponse
+        do { (data, response) = try await session.data(for: request) }
+        catch { throw ServiceFailure.network(error, download: false) }
         guard let http = response as? HTTPURLResponse else { throw VoxError(message: "未收到有效响应。") }
-        guard (200..<300).contains(http.statusCode) else {
-            let message: String
-            switch http.statusCode {
-            case 400: message = "请求被拒绝：请检查 API Key、配音模型、声音 ID 和服务类型。"
-            case 401: message = "API Key 无效或已过期。"
-            case 403: message = "账户、密钥权限或所在地区没有访问权限。"
-            case 404: message = "未找到接口或模型，请核对基础地址和配音模型名称。"
-            case 429: message = "额度不足或请求过于频繁，请检查账户后重试。"
-            case 300..<400: message = "服务地址发生重定向，请在设置中填写最终的 HTTPS 地址。"
-            default: message = "语音服务返回错误（\(http.statusCode)），请稍后重试。"
-            }
-            throw VoxError(message: message)
-        }
+        guard (200..<300).contains(http.statusCode) else { throw ServiceFailure.http(http.statusCode, body: data) }
         if settings.resolvedService.kind == .cosyVoice {
+            if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], json["code"] != nil {
+                throw ServiceFailure.http(http.statusCode, body: data)
+            }
             let url = try Self.cosyVoiceAudioURL(data)
-            // A fresh request intentionally excludes the service API key from the signed audio URL download.
-            var download = URLRequest(url: url); download.timeoutInterval = 120
-            let (audio, audioResponse) = try await session.data(for: download)
+            // Persist before cancellation checks or downloads so a successful synthesis can be resumed.
+            if let file = recoveryFile { try DownloadReceipt(url: url).save(to: file) }
             try Task.checkCancellation()
-            guard let status = audioResponse as? HTTPURLResponse, (200..<300).contains(status.statusCode) else { throw VoxError(message: "配音已生成，但音频下载失败。请检查网络后重试。") }
-            return try AudioFiles.extractPCM(audio)
+            return try await download(url, recoveryFile: recoveryFile)
         }
+        try Task.checkCancellation()
         if settings.resolvedService.kind == .gemini { return try Self.geminiPCM(data) }
         return try Self.audioPCM(data, mime: http.value(forHTTPHeaderField: "Content-Type") ?? "")
+    }
+    func download(_ url: URL, recoveryFile: URL?) async throws -> Data {
+        // Revalidate persisted URLs; downloads never inherit service credentials.
+        let wrapper = try JSONSerialization.data(withJSONObject: ["output": ["finish_reason": "stop", "audio": ["url": url.absoluteString]]])
+        let safeURL = try Self.cosyVoiceAudioURL(wrapper)
+        let audio: Data
+        if let file = recoveryFile, FileManager.default.fileExists(atPath: DownloadReceipt.audioFile(file).path) {
+            audio = try Data(contentsOf: DownloadReceipt.audioFile(file))
+        } else {
+            var request = URLRequest(url: safeURL); request.timeoutInterval = 120
+            let response: URLResponse
+            do { (audio, response) = try await session.data(for: request) }
+            catch { throw ServiceFailure.network(error, download: true) }
+            guard let http = response as? HTTPURLResponse else { throw ServiceFailure.http(0, body: Data(), download: true) }
+            guard (200..<300).contains(http.statusCode) else { throw ServiceFailure.http(http.statusCode, body: Data(), download: true) }
+            if let file = recoveryFile { try audio.write(to: DownloadReceipt.audioFile(file), options: .atomic) }
+        }
+        try Task.checkCancellation()
+        do { return try AudioFiles.extractPCM(audio) }
+        catch { throw ServiceFailure(stage: "音频格式异常", category: "audio", hint: "已保留原始音频。请确认服务返回 WAV；重试会使用缓存。若仍失败，可放弃下载缓存后重新生成（可能计费）。") }
     }
     static func cosyVoiceAudioURL(_ data: Data) throws -> URL {
         guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw VoxError(message: "CosyVoice 返回格式无效。") }
@@ -133,7 +149,7 @@ struct SpeechClient {
         guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw VoxError(message: "Gemini 返回格式无效。") }
         if let feedback = response["promptFeedback"] as? [String: Any], feedback["blockReason"] != nil { throw VoxError(message: "Gemini 拒绝了这段内容，请检查文稿后重试。") }
         guard let candidates = response["candidates"] as? [[String: Any]], let candidate = candidates.first else { throw VoxError(message: "Gemini 没有返回音频，请确认使用的是 TTS 配音模型。") }
-        if let reason = candidate["finishReason"] as? String, reason != "STOP" { throw VoxError(message: "Gemini 未完整生成音频（\(reason)），请缩短段落或修改内容后重试。") }
+        if let reason = candidate["finishReason"] as? String, reason != "STOP" { throw VoxError(message: "Gemini 未完整生成音频，请缩短段落或修改内容后重试。") }
         guard let content = candidate["content"] as? [String: Any], let parts = content["parts"] as? [[String: Any]] else { throw VoxError(message: "Gemini 未返回可用音频。") }
         var result = Data()
         for part in parts {

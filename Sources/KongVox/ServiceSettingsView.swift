@@ -9,6 +9,9 @@ import AVFoundation
     @Published var makeDefault = false
     @Published var message = ""
     @Published var testing = false
+    @Published var diagnostic = ""
+    @Published var discardCache = false
+    var recoveryRoot: URL?
     @Published var testText = "你好，欢迎使用 KongVox。让每一段文字，都有自然的声音。"
     @Published var testVoice = "Kore"
     var task: Task<Void, Never>?
@@ -17,7 +20,7 @@ import AVFoundation
         cancel()
         self.profile = profile; voicesText = profile.voices.joined(separator: ", ")
         key = ""; removeKey = false; makeDefault = profile.id == defaultID
-        testVoice = profile.voices.first ?? ""; message = ""
+        testVoice = profile.voices.first ?? ""; message = ""; diagnostic = ""
     }
     func value() throws -> ServiceProfile {
         var result = profile
@@ -25,28 +28,43 @@ import AVFoundation
         return try result.validated()
     }
     func cancel() { task?.cancel(); player?.stop(); player = nil }
+    func recoveryFile() -> URL? {
+        guard let root = recoveryRoot, let service = try? value(), service.kind == .cosyVoice else { return nil }
+        var settings = VoiceSettings(); settings.service = service; settings.voice = testVoice
+        return root.appendingPathComponent(Segment(text: testText).fingerprint(settings) + ".json")
+    }
+    var hasRecovery: Bool { recoveryFile().map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
+    func clearRecovery() {
+        do { if let file = recoveryFile() { try DownloadReceipt.clear(file) }; message = "下载缓存已放弃，下次试听将重新合成。" }
+        catch { message = "无法清除缓存，请检查本地文件权限。" }
+    }
+    func copyDiagnostic() {
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(diagnostic, forType: .string)
+    }
     func test() {
         guard !testing else { return }
         do {
             let service = try value()
             let token = key.trimmingCharacters(in: .whitespacesAndNewlines)
-            let secret = token.isEmpty && !removeKey ? try KeyStore.read(account: service.keyAccount) : token
-            guard !secret.isEmpty else { throw VoxError(message: "请填写该服务的 API Key。") }
+            let secret = hasRecovery ? "" : token.isEmpty && !removeKey ? try KeyStore.read(account: service.keyAccount) : token
+            guard hasRecovery || !secret.isEmpty else { throw VoxError(message: "请填写该服务的 API Key。") }
             var settings = VoiceSettings(); settings.service = service; settings.voice = testVoice
             let text = testText
             // Validate before presenting a loading state or making a billable request.
-            _ = try SpeechClient().request(text: text, settings: settings, key: secret)
-            testing = true; message = "正在生成短句试听…"; player?.stop()
+            if !hasRecovery { _ = try SpeechClient().request(text: text, settings: settings, key: secret) }
+            let recovery = recoveryFile()
+            diagnostic = ""; testing = true; message = hasRecovery ? "正在恢复下载…" : "正在生成短句试听…"; player?.stop()
             task = Task {
                 defer { testing = false; task = nil }
                 do {
-                    let pcm = try await SpeechClient().generate(text: text, settings: settings, key: secret)
+                    let pcm = try await SpeechClient().generate(text: text, settings: settings, key: secret, recoveryFile: recovery)
                     try Task.checkCancellation()
                     var wav = try AudioFiles.wavHeader(byteCount: pcm.count); wav.append(pcm)
                     player = try AVAudioPlayer(data: wav)
                     guard player?.play() == true else { throw VoxError(message: "音频已生成，但无法播放。") }
+                    if let file = recovery { try? DownloadReceipt.clear(file) }
                     message = "连接成功，正在试听。配置尚需点击保存。"
-                } catch { message = Task.isCancelled ? "已取消试听。" : error.localizedDescription }
+                } catch { diagnostic = ServiceFailure.report(error); message = Task.isCancelled ? "已取消试听。" : error.localizedDescription }
             }
         } catch { message = error.localizedDescription }
     }
@@ -94,10 +112,14 @@ struct ServiceSettings: View {
                                 ForEach((try? editor.value().voices) ?? [editor.testVoice], id: \.self) { Text($0).tag($0) }
                             }.disabled(editor.testing)
                             if editor.testing { ProgressView().controlSize(.small); Button("取消") { editor.cancel() } }
-                            else { Button("测试并试听") { editor.test() } }
+                            else { Button(editor.hasRecovery ? "继续下载并试听" : "测试并试听") { editor.test() } }
                         }
                         Text("测试会发送上方短句至 \(editor.profile.endpointHost)，可能产生 API 费用。不会自动保存配置或修改项目。").font(.caption).foregroundStyle(.secondary)
                         if !editor.message.isEmpty { Text(editor.message).font(.callout).textSelection(.enabled) }
+                        HStack {
+                            if !editor.diagnostic.isEmpty { Button("复制诊断（不含密钥和文稿）") { editor.copyDiagnostic() } }
+                            if editor.hasRecovery { Button("放弃下载缓存") { editor.discardCache = true }.disabled(editor.testing) }
+                        }
                         HStack {
                             Button("删除服务", role: .destructive) {
                                 do { try studio.deleteService(editor.profile.id); if let next = studio.catalog.profiles.first { editor.load(next, defaultID: studio.catalog.defaultID) } }
@@ -110,7 +132,11 @@ struct ServiceSettings: View {
                 }
             }
         }.padding(24).frame(width: 850, height: 690)
+        .confirmationDialog("放弃已生成的下载结果？", isPresented: $editor.discardCache) {
+            Button("放弃缓存", role: .destructive) { editor.clearRecovery() }
+        } message: { Text("下次试听会重新合成，可能再次计费。") }
         .onAppear {
+            editor.recoveryRoot = studio.root.appendingPathComponent("Recovery/Tests")
             let service = studio.catalog.profiles.first { $0.id == studio.project?.settings.resolvedService.id } ?? .gemini
             editor.load(service, defaultID: studio.catalog.defaultID)
         }

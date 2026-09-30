@@ -193,7 +193,13 @@ final class SpeechTests: XCTestCase {
         try wav.testStreamingLengths()
         try wav.testNormalization()
         try wav.testMalformedAudio()
-        print("PASS: 23 test groups; WAV streaming headers and normalization; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
+        let release = Version03Tests()
+        try await release.testRetryWithoutSynthesis()
+        try await release.testUnsafeRecoveryAndInvalidAudio()
+        try await release.testStudioResumeAndIsolation()
+        try release.testSubtitlesTimingAndValidation()
+        try release.testSafeDiagnostics()
+        print("PASS: 28 test groups; persistent download recovery, safe diagnostics, SRT timing; WAV streaming headers and normalization; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
     }
 }
 #endif
