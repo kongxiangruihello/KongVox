@@ -3,9 +3,9 @@ import Security
 import AVFoundation
 
 struct KeyStore {
-    static let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "com.kongvox.api", kSecAttrAccount as String: "openai"]
-    static func read() throws -> String {
-        var q = query
+    static func query(_ account: String) -> [String: Any] { [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "com.kongvox.api", kSecAttrAccount as String: account] }
+    static func read(account: String = "openai") throws -> String {
+        var q = query(account)
         q[kSecReturnData as String] = true
         var value: CFTypeRef?
         let status = SecItemCopyMatching(q as CFDictionary, &value)
@@ -13,7 +13,8 @@ struct KeyStore {
         guard status == errSecSuccess, let data = value as? Data else { throw VoxError(message: "无法读取钥匙串（\(status)）") }
         return String(decoding: data, as: UTF8.self)
     }
-    static func save(_ key: String) throws {
+    static func save(_ key: String, account: String = "openai") throws {
+        let query = query(account)
         if key.isEmpty {
             let status = SecItemDelete(query as CFDictionary)
             guard status == errSecSuccess || status == errSecItemNotFound else { throw VoxError(message: "无法删除密钥（\(status)）") }
@@ -29,35 +30,116 @@ struct KeyStore {
         guard status == errSecSuccess else { throw VoxError(message: "无法保存密钥（\(status)）") }
     }
 }
+// Do not forward credentials through HTTP redirects, including custom endpoints.
+final class NoRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+}
 struct SpeechClient {
-    var session: URLSession = .shared
-    func generate(text: String, settings: VoiceSettings, key: String) async throws -> Data {
-        guard !key.isEmpty else { throw VoxError(message: "请先在服务设置中保存 API Key。") }
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf8.count <= 12000 else { throw VoxError(message: "朗读文本为空或过长，请拆成更短的段落。") }
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/audio/speech")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 180
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+    static let secureSession = URLSession(configuration: .ephemeral, delegate: NoRedirects(), delegateQueue: nil)
+    var session: URLSession = secureSession
+    func request(text: String, settings: VoiceSettings, key: String) throws -> URLRequest {
+        let profile = try settings.resolvedService.validated()
+        guard !key.isEmpty else { throw VoxError(message: "请先在服务设置中保存 \(profile.name) 的 API Key。") }
+        guard !key.hasPrefix("gen-lang-client-") else { throw VoxError(message: "这是 Google 项目 ID，不是 API Key。请从 Google AI Studio 获取该项目的密钥。") }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 3000, text.utf8.count <= 12000 else { throw VoxError(message: "朗读文本为空或过长，请拆成更短的段落。") }
+        guard profile.voices.contains(settings.voice) else { throw VoxError(message: "当前声音不在服务的声音列表中，请重新选择。") }
+        guard settings.speed.isFinite, (0.7...1.3).contains(settings.speed) else { throw VoxError(message: "语速超出支持范围。") }
+        let path = profile.kind == .gemini ? "/models/\(profile.model):generateContent" : "/audio/speech"
+        guard let url = URL(string: profile.normalizedURL + path) else { throw VoxError(message: "服务地址无效。") }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"; request.timeoutInterval = 180
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["model": "gpt-4o-mini-tts", "voice": settings.voice, "input": text, "instructions": settings.instructions, "speed": settings.speed, "response_format": "pcm"])
+        let body: [String: Any]
+        if profile.kind == .gemini {
+            request.setValue(key, forHTTPHeaderField: "x-goog-api-key")
+            let style = settings.instructions + " 语速目标为正常速度的 \(settings.speed) 倍。"
+            let part: [String: Any] = profile.modernGemini ? ["text": text, "speech_metadata": ["style": style]] : ["text": "请按以下要求朗读，仅读出正文。\n表达要求：\(style)\n正文：\n\(text)"]
+            let voice: [String: Any] = profile.modernGemini ? ["voice": settings.voice] : ["prebuiltVoiceConfig": ["voiceName": settings.voice]]
+            body = ["contents": [["role": "user", "parts": [part]]], "generationConfig": ["responseModalities": ["AUDIO"], "speechConfig": ["voiceConfig": voice]]]
+        } else {
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            var speech: [String: Any] = ["model": profile.model, "voice": settings.voice, "input": text, "speed": settings.speed, "response_format": "pcm"]
+            if profile.model != "tts-1" && profile.model != "tts-1-hd" { speech["instructions"] = settings.instructions }
+            body = speech
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return request
+    }
+    func generate(text: String, settings: VoiceSettings, key: String) async throws -> Data {
+        let request = try request(text: text, settings: settings, key: key)
         let (data, response) = try await session.data(for: request)
+        try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse else { throw VoxError(message: "未收到有效响应。") }
         guard (200..<300).contains(http.statusCode) else {
             let message: String
             switch http.statusCode {
+            case 400: message = "请求被拒绝：请检查 API Key、配音模型、声音 ID 和服务类型。"
             case 401: message = "API Key 无效或已过期。"
-            case 403: message = "账户或所在地区没有访问权限。"
+            case 403: message = "账户、密钥权限或所在地区没有访问权限。"
+            case 404: message = "未找到接口或模型，请核对基础地址和配音模型名称。"
             case 429: message = "额度不足或请求过于频繁，请检查账户后重试。"
+            case 300..<400: message = "服务地址发生重定向，请在设置中填写最终的 HTTPS 地址。"
             default: message = "语音服务返回错误（\(http.statusCode)），请稍后重试。"
             }
             throw VoxError(message: message)
         }
-        guard !data.isEmpty, data.count % 2 == 0, !(http.value(forHTTPHeaderField: "Content-Type") ?? "").contains("json") else { throw VoxError(message: "服务返回的音频无效。") }
+        if settings.resolvedService.kind == .gemini { return try Self.geminiPCM(data) }
+        return try Self.audioPCM(data, mime: http.value(forHTTPHeaderField: "Content-Type") ?? "")
+    }
+    static func geminiPCM(_ data: Data) throws -> Data {
+        guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw VoxError(message: "Gemini 返回格式无效。") }
+        if let feedback = response["promptFeedback"] as? [String: Any], feedback["blockReason"] != nil { throw VoxError(message: "Gemini 拒绝了这段内容，请检查文稿后重试。") }
+        guard let candidates = response["candidates"] as? [[String: Any]], let candidate = candidates.first else { throw VoxError(message: "Gemini 没有返回音频，请确认使用的是 TTS 配音模型。") }
+        if let reason = candidate["finishReason"] as? String, reason != "STOP" { throw VoxError(message: "Gemini 未完整生成音频（\(reason)），请缩短段落或修改内容后重试。") }
+        guard let content = candidate["content"] as? [String: Any], let parts = content["parts"] as? [[String: Any]] else { throw VoxError(message: "Gemini 未返回可用音频。") }
+        var result = Data()
+        for part in parts {
+            guard let inline = (part["inlineData"] ?? part["inline_data"]) as? [String: Any] else { continue }
+            guard let base64 = inline["data"] as? String, let bytes = Data(base64Encoded: base64), let mime = (inline["mimeType"] ?? inline["mime_type"]) as? String else { throw VoxError(message: "Gemini 音频数据无效。") }
+            result.append(try audioPCM(bytes, mime: mime))
+        }
+        guard !result.isEmpty else { throw VoxError(message: "Gemini 没有返回音频，请确认使用的是 TTS 配音模型。") }
+        return result
+    }
+    static func audioPCM(_ data: Data, mime: String) throws -> Data {
+        let mime = mime.lowercased().replacingOccurrences(of: " ", with: "")
+        if data.prefix(4) == Data("RIFF".utf8) { return try AudioFiles.extractPCM(data) }
+        let type = mime.components(separatedBy: ";").first ?? ""
+        guard ["audio/pcm", "audio/l16", "application/octet-stream"].contains(type), !data.isEmpty, data.count % 2 == 0 else { throw VoxError(message: "服务未返回有效的 PCM/WAV 音频，请检查接口兼容性。") }
+        for parameter in mime.components(separatedBy: ";").dropFirst() {
+            if parameter.hasPrefix("rate="), parameter != "rate=24000" { throw VoxError(message: "暂不支持该采样率，服务需返回 24 kHz PCM 或 WAV。") }
+            if parameter.hasPrefix("channels="), parameter != "channels=1" { throw VoxError(message: "服务需返回单声道音频。") }
+        }
         return data
     }
 }
 enum AudioFiles {
-    // OpenAI raw PCM: signed 16-bit little-endian, 24 kHz mono.
+    // Normalize supported WAV containers to our canonical raw PCM, including files with extra RIFF chunks.
+    static func extractPCM(_ data: Data) throws -> Data {
+        func fail() -> VoxError { VoxError(message: "WAV 音频损坏或格式不支持，需要 24 kHz、单声道、16-bit PCM。") }
+        func uint(_ start: Int, _ count: Int) throws -> UInt32 {
+            guard start >= 0, start + count <= data.count else { throw fail() }
+            return (0..<count).reduce(UInt32(0)) { $0 | UInt32(data[start + $1]) << (8 * $1) }
+        }
+        guard data.count >= 44, data.prefix(4) == Data("RIFF".utf8), data[8..<12] == Data("WAVE".utf8) else { throw fail() }
+        let declared = Int(try uint(4, 4)) + 8
+        guard declared <= data.count, declared >= 44 else { throw fail() }
+        var offset = 12, formatOK = false, audio = Data()
+        while offset + 8 <= declared {
+            let name = String(decoding: data[offset..<offset + 4], as: UTF8.self)
+            let size = Int(try uint(offset + 4, 4)), start = offset + 8
+            guard size <= declared - start else { throw fail() }
+            if name == "fmt " {
+                guard size >= 16 else { throw fail() }
+                let format = try uint(start, 2), channels = try uint(start + 2, 2), rate = try uint(start + 4, 4), bits = try uint(start + 14, 2)
+                formatOK = format == 1 && channels == 1 && rate == 24000 && bits == 16
+            } else if name == "data" { audio.append(data[start..<start + size]) }
+            offset = start + size + size % 2
+        }
+        guard formatOK, !audio.isEmpty, audio.count % 2 == 0 else { throw fail() }
+        return audio
+    }
+    // Canonical raw PCM: signed 16-bit little-endian, 24 kHz mono.
     static func wavHeader(byteCount: Int) throws -> Data {
         guard byteCount >= 0, byteCount <= Int(UInt32.max) - 36 else { throw VoxError(message: "音频超过 WAV 大小限制，请分项目导出。") }
         var result = Data("RIFF".utf8)

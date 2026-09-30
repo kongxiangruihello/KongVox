@@ -121,7 +121,8 @@ final class SpeechTests: XCTestCase {
         let client = SpeechClient(session: URLSession(configuration: config))
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let studio = Studio(root: dir, client: client, keyProvider: { "test-only" })
+        let studio = Studio(root: dir, client: client, keyProvider: { _ in "test-only" })
+        studio.selectService("openai")
         studio.edit { $0.draft = "第一段。\n第二段。\n第三段。" }
         studio.importDraft()
         MockProtocol.count = 0; MockProtocol.failOnRequest = 2
@@ -130,7 +131,7 @@ final class SpeechTests: XCTestCase {
         await studio.task?.value
         XCTAssertEqual(studio.project?.segments.filter { $0.current != nil }.count, 1)
         XCTAssertFalse(studio.busy)
-        let resumed = Studio(root: dir, client: client, keyProvider: { "test-only" })
+        let resumed = Studio(root: dir, client: client, keyProvider: { _ in "test-only" })
         MockProtocol.failOnRequest = nil; MockProtocol.count = 0
         resumed.generate()
         await resumed.task?.value
@@ -174,7 +175,15 @@ final class SpeechTests: XCTestCase {
         try suite.testCorruptProjectIsNotOverwritten()
         try await SpeechTests().testRequestAndHTTPFailures()
         try await SpeechTests().testQueueFailureResumeAndCancel()
-        print("PASS: 8 test groups (split, freshness, WAV/M4A, safe export, persistence, corruption, HTTP, queue resume/cancel)")
+        let services = ServiceTests()
+        try services.testGeminiRequestFormats()
+        try services.testCustomServiceAndCredentials()
+        try services.testGeminiAudioAndFailures()
+        try services.testWavChunksAndInvalidFormats()
+        try services.testLegacyMigration()
+        try services.testServicePersistenceAndSnapshots()
+        try await services.testGeminiQueue()
+        print("PASS: 15 test groups; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
     }
 }
 #endif

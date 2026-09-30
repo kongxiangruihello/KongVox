@@ -2,6 +2,8 @@ import Foundation
 import CryptoKit
 
 struct VoiceSettings: Codable, Equatable {
+    var service: ServiceProfile?
+    var resolvedService: ServiceProfile { service ?? .openAI }
     var voice = "marin"
     var speed = 1.0
     var mode = "短视频口播"
@@ -17,6 +19,9 @@ struct Take: Codable, Identifiable {
     var file: String
     var fingerprint: String
     var date = Date()
+    var service: ServiceProfile?
+    var settings: VoiceSettings?
+    var spokenText: String?
 }
 struct Segment: Codable, Identifiable {
     var id = UUID()
@@ -28,7 +33,9 @@ struct Segment: Codable, Identifiable {
     var current: Take? { takes.first { $0.id == selectedTake } }
     func fingerprint(_ settings: VoiceSettings) -> String {
         // Pause is applied at export, so it must not invalidate generated speech.
-        let payload = [spokenText, settings.voice, String(settings.speed), settings.instructions].joined(separator: "\u{0}")
+        var fields = [spokenText, settings.voice, String(settings.speed), settings.instructions]
+        if !settings.resolvedService.isLegacyOpenAI { fields.append(settings.resolvedService.signature) }
+        let payload = fields.joined(separator: "\u{0}")
         return SHA256.hash(data: Data(payload.utf8)).map { String(format: "%02x", $0) }.joined()
     }
     func ready(_ settings: VoiceSettings) -> Bool { current?.fingerprint == fingerprint(settings) }

@@ -3,6 +3,7 @@ import AVFoundation
 import UniformTypeIdentifiers
 
 @MainActor final class Studio: ObservableObject {
+    @Published var catalog = ServiceCatalog()
     @Published var projects: [Project] = []
     @Published var selected: UUID?
     @Published var busy = false
@@ -17,21 +18,69 @@ import UniformTypeIdentifiers
     private var playbackTimer: Timer?
     private var storageAvailable = true
     let client: SpeechClient
-    let keyProvider: () throws -> String
-    init(root: URL? = nil, client: SpeechClient = SpeechClient(), keyProvider: @escaping () throws -> String = KeyStore.read) {
+    let keyProvider: (ServiceProfile) throws -> String
+    init(root: URL? = nil, client: SpeechClient = SpeechClient(), keyProvider: @escaping (ServiceProfile) throws -> String = { try KeyStore.read(account: $0.keyAccount) }) {
         self.client = client
         self.keyProvider = keyProvider
         self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("KongVox")
         do {
             try FileManager.default.createDirectory(at: self.root.appendingPathComponent("Audio"), withIntermediateDirectories: true)
+            let servicesFile = self.root.appendingPathComponent("services.json")
+            if FileManager.default.fileExists(atPath: servicesFile.path) { catalog = try JSONDecoder().decode(ServiceCatalog.self, from: Data(contentsOf: servicesFile)) }
             let file = self.root.appendingPathComponent("projects.json")
-            if FileManager.default.fileExists(atPath: file.path) { projects = try JSONDecoder().decode([Project].self, from: Data(contentsOf: file)) }
+            if FileManager.default.fileExists(atPath: file.path) {
+                projects = try JSONDecoder().decode([Project].self, from: Data(contentsOf: file))
+                let backup = self.root.appendingPathComponent("projects-before-0.2.json")
+                if projects.contains(where: { $0.settings.service == nil }), !FileManager.default.fileExists(atPath: backup.path) {
+                    try FileManager.default.copyItem(at: file, to: backup)
+                }
+            }
         } catch {
             storageAvailable = false
             self.error = "项目读取失败，已停止自动保存以保护原文件：\(error.localizedDescription)"
         }
-        if projects.isEmpty { projects = [Project()] }
+        if projects.isEmpty { projects = [makeProject()] }
         selected = projects.first?.id
+    }
+    func makeProject() -> Project {
+        var p = Project()
+        let service = catalog.profiles.first { $0.id == catalog.defaultID && $0.enabled } ?? catalog.profiles.first { $0.enabled } ?? .openAI
+        p.settings.service = service
+        p.settings.voice = service.voices.first ?? "marin"
+        return p
+    }
+    func selectService(_ id: String) {
+        guard let service = catalog.profiles.first(where: { $0.id == id && $0.enabled }) else { return }
+        edit { p in p.settings.service = service; p.settings.voice = service.voices.first ?? "" }
+    }
+    func saveService(_ service: ServiceProfile, key: String?, makeDefault: Bool) throws {
+        guard !busy, storageAvailable else { throw VoxError(message: "当前无法修改服务设置。") }
+        let profile = try service.validated()
+        var updated = catalog
+        if let i = updated.profiles.firstIndex(where: { $0.id == profile.id }) { updated.profiles[i] = profile }
+        else { updated.profiles.append(profile) }
+        if makeDefault {
+            guard profile.enabled else { throw VoxError(message: "默认服务必须启用。") }
+            updated.defaultID = profile.id
+        }
+        guard updated.profiles.contains(where: { $0.enabled }) else { throw VoxError(message: "请保留至少一个启用的服务。") }
+        if updated.profiles.first(where: { $0.id == updated.defaultID })?.enabled != true { updated.defaultID = updated.profiles.first { $0.enabled }!.id }
+        if let key { try KeyStore.save(key.trimmingCharacters(in: .whitespacesAndNewlines), account: profile.keyAccount) }
+        try JSONEncoder().encode(updated).write(to: root.appendingPathComponent("services.json"), options: .atomic)
+        catalog = updated
+        // Projects keep the exact service snapshot used for their voice settings.
+        // Explicitly selecting the edited service applies it to a project; existing takes remain exportable.
+    }
+    func deleteService(_ id: String) throws {
+        guard !busy, storageAvailable else { return }
+        guard !projects.contains(where: { $0.settings.resolvedService.id == id }) else { throw VoxError(message: "有项目正在使用此服务，请先切换这些项目的服务；也可以先停用。") }
+        var updated = catalog
+        updated.profiles.removeAll { $0.id == id }
+        guard updated.profiles.contains(where: { $0.enabled }) else { throw VoxError(message: "请保留至少一个启用的服务。") }
+        if updated.defaultID == id { updated.defaultID = updated.profiles.first { $0.enabled }!.id }
+        try JSONEncoder().encode(updated).write(to: root.appendingPathComponent("services.json"), options: .atomic)
+        catalog = updated
+        // Historical take snapshots may still reference this account. Do not silently erase their key.
     }
     var project: Project? { projects.first { $0.id == selected } }
     @discardableResult func save() -> Bool {
@@ -47,7 +96,7 @@ import UniformTypeIdentifiers
     func newProject() {
         guard !busy else { return }
         stop()
-        let p = Project(); projects.insert(p, at: 0); selected = p.id; save()
+        let p = makeProject(); projects.insert(p, at: 0); selected = p.id; save()
     }
     func importDraft() {
         edit { p in
@@ -63,8 +112,11 @@ import UniformTypeIdentifiers
         guard !busy, storageAvailable, let snapshot = project else { return }
         let pending = snapshot.segments.filter { only == nil ? !ready($0, settings: snapshot.settings) : $0.id == only }
         guard !pending.isEmpty else { status = "全部段落已生成。"; return }
+        let service = snapshot.settings.resolvedService
+        guard let saved = catalog.profiles.first(where: { $0.id == service.id }), saved.enabled else { error = "该服务已停用，请在声音工作台切换或在服务设置中启用。"; return }
+        guard saved == service else { error = "服务配置已更新，请在声音工作台点击「应用最新服务配置」，确认后再生成。"; return }
         let key: String
-        do { key = try keyProvider(); guard !key.isEmpty else { throw VoxError(message: "请先打开服务设置，保存 API Key。") } }
+        do { key = try keyProvider(service); guard !key.isEmpty else { throw VoxError(message: "请先打开服务设置，保存 API Key。") } }
         catch { self.error = error.localizedDescription; return }
         stop(); busy = true; progress = 0
         task = Task {
@@ -76,7 +128,7 @@ import UniformTypeIdentifiers
                     status = "正在生成 \(offset + 1) / \(pending.count) 段…"
                     let pcm = try await client.generate(text: segment.spokenText, settings: snapshot.settings, key: key)
                     try Task.checkCancellation()
-                    let take = Take(file: "\(UUID().uuidString).wav", fingerprint: segment.fingerprint(snapshot.settings))
+                    let take = Take(file: "\(UUID().uuidString).wav", fingerprint: segment.fingerprint(snapshot.settings), service: service, settings: snapshot.settings, spokenText: segment.spokenText)
                     try AudioFiles.writePCM(pcm, to: audioURL(take))
                     guard let pi = projects.firstIndex(where: { $0.id == snapshot.id }), let si = projects[pi].segments.firstIndex(where: { $0.id == segment.id }) else { return }
                     projects[pi].segments[si].takes.insert(take, at: 0)

@@ -1,10 +1,11 @@
-# KongVox 0.1 验证记录
+# KongVox 0.2 验证记录
 
-2026-09-28，Apple Silicon Mac。
+构建与自动化测试：2026-09-28；交付整理：2026-09-30。Apple Silicon Mac。
 
-- Release 构建成功，生成原生 `.app` 与 ZIP；本地 ad-hoc 签名校验通过。
-- 8 组核心测试通过：Unicode 分段、过期音频判定、WAV 合并/静音/M4A 转换、错误时保留导出原文件、项目恢复/音频缺失、损坏项目保护、模拟 HTTP 错误、生成失败续接与取消。
-- 本机仅有 Command Line Tools，缺少 XCTest；使用 `bash scripts/test-core.sh` 执行同一份测试。GitHub Actions 配置在完整 Xcode 环境执行 `swift test`。
-- 原生 UI 已打开，验证项目改名、粘贴示例文稿、生成两个段落卡片，检查窗口布局。
-- 未进行真实付费 API 合成，未验证声音自然度、钥匙串实际密钥读写、MP3 编码与其它 Mac 版本兼容性。
-- 本地构建为 arm64，适用于 Apple Silicon；Intel 用户需要自行在对应架构构建。
+- Release 构建成功，生成原生应用和 ZIP；ad-hoc 签名校验通过。
+- 15 组测试通过。新增覆盖 Gemini 新旧请求格式、WAV/PCM 解码、截断/拒绝/空音频响应、服务配置与密钥账户隔离、旧项目与历史音频迁移、Gemini 队列与服务切换。
+- 本机缺少 XCTest，使用 `scripts/test-core.sh` 执行同一份测试；GitHub Actions 配置完整 Xcode 环境测试。
+- 已实际打开 0.2，确认原有两段示例文稿恢复，主窗口显示服务选择与模型名称。
+- 最后的服务设置页 UI 自动化受电脑控制工具超时影响，未完成完整手工流程验证。
+- 未使用真实密钥，未验证真实付费合成、主观音质、真实钥匙串密钥读写或 MP3 编码。
+- 本地包为 arm64，未进行 Developer ID 签名、公证或 Intel 测试。

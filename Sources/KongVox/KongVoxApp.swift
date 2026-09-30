@@ -33,7 +33,7 @@ struct StudioView: View {
                     }
                 }.listStyle(.sidebar).disabled(studio.busy)
                 Button { state.showSettings = true } label: { Label("服务设置", systemImage: "key") }.disabled(studio.busy)
-                Text("KongVox 0.1 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
+                Text("KongVox 0.2 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
             }.padding(18).navigationSplitViewColumnWidth(230)
         } detail: {
             VStack(spacing: 0) {
@@ -65,7 +65,7 @@ struct StudioView: View {
             }.background(Color(nsColor: .windowBackgroundColor))
         }
         .tint(.indigo)
-        .sheet(isPresented: $state.showSettings) { ServiceSettings() }
+        .sheet(isPresented: $state.showSettings) { ServiceSettings().environmentObject(studio) }
         .onChange(of: studio.selected) { _ in studio.stop() }
         .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil } } message: { Text(studio.error ?? "") }
     }
@@ -73,15 +73,25 @@ struct StudioView: View {
         Binding(get: { studio.project?[keyPath: key] ?? fallback }, set: { value in studio.edit { $0[keyPath: key] = value } })
     }
     func settingsPanel(_ p: Project) -> some View {
-        VStack(alignment: .leading, spacing: 22) {
+        ScrollView { VStack(alignment: .leading, spacing: 18) {
             Label("声音工作台", systemImage: "slider.horizontal.3").font(.headline)
+            Picker("配音服务", selection: Binding(get: { p.settings.resolvedService.id }, set: { studio.selectService($0) })) {
+                ForEach(studio.catalog.profiles.filter { $0.enabled || $0.id == p.settings.resolvedService.id }) { service in
+                    Text(service.name + (service.enabled ? "" : "（已停用）")).tag(service.id)
+                }
+            }
+            Text(p.settings.resolvedService.model).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            if studio.catalog.profiles.first(where: { $0.id == p.settings.resolvedService.id }) != p.settings.resolvedService {
+                Button("应用最新服务配置") { studio.selectService(p.settings.resolvedService.id) }.font(.caption)
+            }
             Picker("使用场景", selection: bind(\.settings.mode, fallback: "短视频口播")) { Text("短视频口播").tag("短视频口播"); Text("长文章").tag("长文章") }
             Picker("声音", selection: bind(\.settings.voice, fallback: "marin")) {
-                ForEach(["marin", "cedar", "coral", "sage", "alloy"], id: \.self) { Text($0.capitalized).tag($0) }
+                ForEach(p.settings.resolvedService.voices, id: \.self) { Text($0).tag($0) }
             }
             VStack(alignment: .leading) {
                 Text("语速  \(p.settings.speed, specifier: "%.2f")×")
                 Slider(value: bind(\.settings.speed, fallback: 1), in: 0.7...1.3, step: 0.05)
+                if p.settings.resolvedService.kind == .gemini { Text("Gemini 通过表达指令调整节奏，倍速为参考目标。").font(.caption2).foregroundStyle(.secondary) }
             }
             VStack(alignment: .leading, spacing: 8) {
                 Text("表达要求")
@@ -90,9 +100,9 @@ struct StudioView: View {
             Picker("段间停顿", selection: bind(\.settings.pause, fallback: 0.35)) { Text("紧凑 · 0.15 秒").tag(0.15); Text("标准 · 0.35 秒").tag(0.35); Text("舒缓 · 0.7 秒").tag(0.7) }
             Divider()
             Text("先生成一段试听，再生成全文。每段可保留多个版本。改变声音、语速或表达要求后，需要重新生成。").font(.caption).foregroundStyle(.secondary)
-            Text("生成时，朗读文本将发送至 OpenAI，并按你的 API 账户计费。试听已有音频与导出不产生生成费用。").font(.caption).foregroundStyle(.secondary)
+            Text("生成时，朗读文本将发送至 \(p.settings.resolvedService.name)（\(p.settings.resolvedService.endpointHost)），并按你的 API 账户计费。试听已有音频与导出不产生生成费用。").font(.caption).foregroundStyle(.secondary)
             Spacer()
-        }.textFieldStyle(.roundedBorder)
+        }.textFieldStyle(.roundedBorder) }
     }
     func footer(_ p: Project) -> some View {
         HStack(spacing: 14) {
@@ -113,7 +123,7 @@ struct StudioView: View {
                     Button("WAV · 无损剪辑") { studio.export(format: "wav") }
                     Button("M4A · 小体积") { studio.export(format: "m4a") }
                     Button(Studio.ffmpeg == nil ? "MP3 · 需安装 FFmpeg" : "MP3 · 通用分享") { studio.export(format: "mp3") }.disabled(Studio.ffmpeg == nil)
-                }.disabled(p.segments.isEmpty)
+                }.fixedSize().disabled(p.segments.isEmpty)
                 Button("生成待更新段落") { studio.generate() }.buttonStyle(.borderedProminent).disabled(p.segments.isEmpty)
             }
         }.padding(18)
@@ -139,6 +149,9 @@ struct SegmentCard: View {
             }
             TextField("文稿", text: binding(\.text), axis: .vertical).textFieldStyle(.plain).font(.system(size: 16)).lineSpacing(6)
             DisclosureGroup("发音修正（可选，不改原稿）") { TextField("输入这一段的完整朗读替代文本", text: binding(\.pronunciation), axis: .vertical).textFieldStyle(.roundedBorder) }.font(.caption).foregroundStyle(.secondary)
+            if let take = segment.current, let service = take.service {
+                Text("此版本：\(service.name) · \(service.model) · \(take.settings?.voice ?? "")").font(.caption2).foregroundStyle(.secondary)
+            }
             HStack {
                 Button(segment.current == nil ? "生成并试听" : "重新生成") { studio.generate(only: segment.id) }
                 if let take = segment.current {
@@ -154,21 +167,5 @@ struct SegmentCard: View {
                 Spacer()
             }.controlSize(.small)
         }.padding(18).background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 14)).overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
-    }
-}
-struct ServiceSettings: View {
-    @Environment(\.dismiss) var dismiss
-    @StateObject private var state = ViewState()
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Label("连接配音服务", systemImage: "waveform").font(.title2.bold())
-            Text("OpenAI · GPT-4o mini TTS").font(.headline)
-            Text("输入你自己的 API Key。密钥只保存在这台 Mac 的钥匙串，文稿和音频保存在本地。生成时会将朗读文本发送给 OpenAI。")
-            SecureField("API Key", text: $state.key).textFieldStyle(.roundedBorder)
-            Text("需要可用的 API 额度及服务访问权限；ChatGPT 订阅不等于 API 额度。清空后保存可删除密钥。").font(.caption).foregroundStyle(.secondary)
-            if !state.message.isEmpty { Text(state.message).foregroundStyle(.red) }
-            HStack { Spacer(); Button("取消") { dismiss() }; Button("保存") { do { try KeyStore.save(state.key.trimmingCharacters(in: .whitespacesAndNewlines)); dismiss() } catch { state.message = error.localizedDescription } }.buttonStyle(.borderedProminent) }
-        }.padding(28).frame(width: 470)
-        .onAppear { do { state.key = try KeyStore.read() } catch { state.message = error.localizedDescription } }
     }
 }
