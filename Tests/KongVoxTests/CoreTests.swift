@@ -189,7 +189,11 @@ final class SpeechTests: XCTestCase {
         try await cosy.testRoundTrip()
         try await cosy.testDownloadFailure()
         try cosy.testCatalogUpgrade()
-        print("PASS: 20 test groups; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
+        let wav = WAVDecoderTests()
+        try wav.testStreamingLengths()
+        try wav.testNormalization()
+        try wav.testMalformedAudio()
+        print("PASS: 23 test groups; WAV streaming headers and normalization; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
     }
 }
 #endif

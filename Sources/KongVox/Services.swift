@@ -157,31 +157,7 @@ struct SpeechClient {
     }
 }
 enum AudioFiles {
-    // Normalize supported WAV containers to our canonical raw PCM, including files with extra RIFF chunks.
-    static func extractPCM(_ data: Data) throws -> Data {
-        func fail() -> VoxError { VoxError(message: "WAV 音频损坏或格式不支持，需要 24 kHz、单声道、16-bit PCM。") }
-        func uint(_ start: Int, _ count: Int) throws -> UInt32 {
-            guard start >= 0, start + count <= data.count else { throw fail() }
-            return (0..<count).reduce(UInt32(0)) { $0 | UInt32(data[start + $1]) << (8 * $1) }
-        }
-        guard data.count >= 44, data.prefix(4) == Data("RIFF".utf8), data[8..<12] == Data("WAVE".utf8) else { throw fail() }
-        let declared = Int(try uint(4, 4)) + 8
-        guard declared <= data.count, declared >= 44 else { throw fail() }
-        var offset = 12, formatOK = false, audio = Data()
-        while offset + 8 <= declared {
-            let name = String(decoding: data[offset..<offset + 4], as: UTF8.self)
-            let size = Int(try uint(offset + 4, 4)), start = offset + 8
-            guard size <= declared - start else { throw fail() }
-            if name == "fmt " {
-                guard size >= 16 else { throw fail() }
-                let format = try uint(start, 2), channels = try uint(start + 2, 2), rate = try uint(start + 4, 4), bits = try uint(start + 14, 2)
-                formatOK = format == 1 && channels == 1 && rate == 24000 && bits == 16
-            } else if name == "data" { audio.append(data[start..<start + size]) }
-            offset = start + size + size % 2
-        }
-        guard formatOK, !audio.isEmpty, audio.count % 2 == 0 else { throw fail() }
-        return audio
-    }
+    static func extractPCM(_ data: Data) throws -> Data { try WAVDecoder.decode(data) }
     // Canonical raw PCM: signed 16-bit little-endian, 24 kHz mono.
     static func wavHeader(byteCount: Int) throws -> Data {
         guard byteCount >= 0, byteCount <= Int(UInt32.max) - 36 else { throw VoxError(message: "音频超过 WAV 大小限制，请分项目导出。") }

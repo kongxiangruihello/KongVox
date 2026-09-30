@@ -17,7 +17,9 @@ final class CosyProtocol: URLProtocol {
         if synthesis {
             data = Data(#"{"output":{"finish_reason":"stop","audio":{"url":"http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/test.wav?Signature=fixture"}}}"#.utf8)
         } else {
-            var wav = try! AudioFiles.wavHeader(byteCount: 100); wav.append(Data(repeating: 0, count: 100)); data = wav
+            var wav = WAVDecoderTests.fixture(rate: 48000, channels: 2)
+            wav.replaceSubrange(4..<8, with: Data(repeating: 255, count: 4))
+            wav.replaceSubrange(40..<44, with: Data(repeating: 255, count: 4)); data = wav
         }
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": synthesis ? "application/json" : "audio/wav"])!, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
@@ -73,7 +75,7 @@ final class CosyVoiceTests: XCTestCase {
     func testRoundTrip() async throws {
         CosyProtocol.requests = []; CosyProtocol.downloadStatus = 200
         let audio = try await client().generate(text: "配音测试。", settings: settings(), key: "fixture-secret")
-        XCTAssertEqual(audio.count, 100)
+        XCTAssertTrue(abs(audio.count - 48000) <= 4)
         XCTAssertEqual(CosyProtocol.requests.count, 2)
         XCTAssertEqual(CosyProtocol.requests[1].url?.scheme, "https")
         XCTAssertEqual(CosyProtocol.requests[1].value(forHTTPHeaderField: "Authorization"), nil)

@@ -1,6 +1,12 @@
-# KongVox 0.2.1
+# KongVox 0.2.2
 
 个人使用的原生 macOS 配音工作台，面向短视频口播与长文章。SwiftUI 编写，无第三方 Swift 依赖。
+
+## 0.2.2：WAV 兼容性修复
+
+修复试听时 WAV 解析过于严格的问题：兼容流式文件头中的未知长度，支持整数 PCM、32-bit 浮点和标准扩展 WAV；将不同采样率和声道转换为 24 kHz、单声道、16-bit PCM。截断文件、无效格式及非有限浮点采样仍会报错，并提供更具体的原因。
+
+已通过模拟 CosyVoice 下载与本地音频测试，未取得本次报错的原始响应或进行真实付费合成，需在新版中重试试听确认。
 
 ## 0.2.1：阿里云 CosyVoice
 
@@ -67,10 +73,10 @@ macOS 13+，Swift 5.9+ / Xcode Command Line Tools。
 swift test  # 完整 Xcode 环境
 # 仅有 Command Line Tools：bash scripts/test-core.sh
 bash scripts/build-app.sh
-open dist/KongVox-0.2.1/KongVox.app
+open dist/KongVox-0.2.2/KongVox.app
 ```
 
-产出 `dist/KongVox-0.2.1/KongVox.app` 与 `dist/KongVox-0.2.1-Mac.zip`，按当前 Mac 架构构建。本地交付为 Apple Silicon 版本，使用 ad-hoc 签名，尚未 Developer ID 公证。
+产出 `dist/KongVox-0.2.2/KongVox.app` 与 `dist/KongVox-0.2.2-Mac.zip`，按当前 Mac 架构构建。本地交付为 Apple Silicon 版本，使用 ad-hoc 签名，尚未 Developer ID 公证。
 
 ## 数据
 

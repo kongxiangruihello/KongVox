@@ -33,7 +33,7 @@ struct StudioView: View {
                     }
                 }.listStyle(.sidebar).disabled(studio.busy)
                 Button { state.showSettings = true } label: { Label("服务设置", systemImage: "key") }.disabled(studio.busy)
-                Text("KongVox 0.2.1 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
+                Text("KongVox 0.2.2 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
             }.padding(18).navigationSplitViewColumnWidth(230)
         } detail: {
             VStack(spacing: 0) {
