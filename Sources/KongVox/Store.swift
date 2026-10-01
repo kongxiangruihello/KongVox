@@ -117,6 +117,22 @@ import UniformTypeIdentifiers
             p.draft = ""
         }
     }
+    func setLongMode(_ enabled: Bool) {
+        edit { p in
+            if enabled && !p.isLongMode {
+                p.longText = (p.segments.map(\.text) + (p.draft.isEmpty ? [] : [p.draft])).joined(separator: "\n\n")
+                p.preparedLongText = p.segments.map(\.text).joined(separator: "\n\n")
+            } else if !enabled && p.isLongMode {
+                p.prepareLongDocument()
+            }
+            p.longMode = enabled
+        }
+    }
+    var fullAudioReady: Bool { (try? currentURLs()) != nil }
+    var fullProgress: Double {
+        guard let p = project, !p.segments.isEmpty, !(p.isLongMode && p.needsLongPreparation) else { return 0 }
+        return Double(p.segments.filter { ready($0, settings: p.settings) }.count) / Double(p.segments.count)
+    }
     func audioURL(_ take: Take) -> URL { root.appendingPathComponent("Audio").appendingPathComponent(take.file) }
     func ready(_ segment: Segment, settings: VoiceSettings) -> Bool {
         segment.ready(settings) && segment.current.map { FileManager.default.fileExists(atPath: audioURL($0).path) } == true
@@ -138,13 +154,18 @@ import UniformTypeIdentifiers
         NSPasteboard.general.setString(diagnostic, forType: .string)
     }
     func generate(only: UUID? = nil) {
-        guard !busy, storageAvailable, let snapshot = project else { return }
+        guard !busy, storageAvailable else { return }
+        if only == nil, project?.isLongMode == true, let index = projects.firstIndex(where: { $0.id == selected }) {
+            projects[index].prepareLongDocument()
+            guard save() else { return }
+        }
+        guard let snapshot = project else { return }
         let pending = snapshot.segments.filter { only == nil ? !ready($0, settings: snapshot.settings) : $0.id == only }
-        guard !pending.isEmpty else { status = "全部段落已生成。"; return }
+        guard !pending.isEmpty else { status = "全文已就绪，可以试听或导出完整音频。"; return }
         let service = snapshot.settings.resolvedService
         guard let saved = catalog.profiles.first(where: { $0.id == service.id }), saved.enabled else { error = "该服务已停用，请在声音工作台切换或在服务设置中启用。"; return }
         guard saved == service else { error = "服务配置已更新，请在声音工作台点击「应用最新服务配置」，确认后再生成。"; return }
-        stop(); busy = true; progress = 0; diagnostic = ""
+        stop(); busy = true; progress = only == nil ? fullProgress : 0; diagnostic = ""
         task = Task {
             defer { busy = false; activeSegment = nil; task = nil }
             var generationKey: String?
@@ -154,7 +175,9 @@ import UniformTypeIdentifiers
                     activeSegment = segment.id
                     let recovery = recoveryFile(segment, project: snapshot)
                     let resume = FileManager.default.fileExists(atPath: recovery.path)
-                    status = "\(resume ? "正在恢复下载" : "正在生成") \(offset + 1) / \(pending.count) 段…"
+                    status = snapshot.isLongMode && only == nil
+                        ? "\(resume ? "正在恢复全文" : "正在生成全文") · \(Int(progress * 100))%（剩余 \(pending.count - offset) 个处理单元）"
+                        : "\(resume ? "正在恢复下载" : "正在生成") \(offset + 1) / \(pending.count) 段…"
                     if !resume && generationKey == nil { generationKey = try keyProvider(service) }
                     let key = resume ? "" : generationKey ?? ""
                     let pcm = try await client.generate(text: segment.spokenText, settings: snapshot.settings, key: key, recoveryFile: recovery)
@@ -166,7 +189,7 @@ import UniformTypeIdentifiers
                     projects[pi].segments[si].selectedTake = take.id
                     guard save() else { status = "保存失败，已停止后续生成。"; return }
                     try? DownloadReceipt.clear(recovery)
-                    progress = Double(offset + 1) / Double(pending.count)
+                    progress = only == nil ? fullProgress : Double(offset + 1) / Double(pending.count)
                 } catch {
                     if Task.isCancelled { status = "已取消，完成的段落已保存。" }
                     else { diagnostic = ServiceFailure.report(error); self.error = error.localizedDescription; status = "生成已暂停，点击生成即可继续未完成段落。" }
@@ -199,6 +222,7 @@ import UniformTypeIdentifiers
     }
     func currentURLs() throws -> [URL] {
         guard let p = project, !p.segments.isEmpty else { throw VoxError(message: "请先添加文稿。") }
+        guard !(p.isLongMode && p.needsLongPreparation) else { throw VoxError(message: "全文已修改，请点击「生成全文」更新后再试听或导出。") }
         guard p.segments.allSatisfy({ ready($0, settings: p.settings) }) else { throw VoxError(message: "有未生成或已修改的段落，请先生成最新配音。") }
         return p.segments.compactMap { $0.current.map(audioURL) }
     }

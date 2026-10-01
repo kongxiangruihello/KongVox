@@ -1,6 +1,17 @@
-# KongVox 0.3.1
+# KongVox 0.4
 
 个人使用的原生 macOS 配音工作台，面向短视频口播与长文章。SwiftUI 编写，无第三方 Swift 依赖。
+
+## 0.4：长文模式
+
+默认以完整文章编辑，不再要求手动「添加为配音段落」。粘贴全文 → 点击「生成全文」→ 完成后试听或「导出完整音频」。WAV/M4A 导出自动合并全文；MP3 仍需 FFmpeg。
+
+- 文章原样保留，服务长度限制由后台分段处理：Qwen 最多 500 字，其他服务最多 700 字。服务仍按实际 API 使用计费。
+- 显示全文进度，生成失败或关闭后重新点击「生成全文」继续；未变化的处理片段保留原有音频、历史与下载恢复标识。
+- 修改全文后禁用旧音频的完整试听和导出，更新生成后恢复。字幕也遵循同一校验。
+- 「段落精调」保留发音替代文本、单段重做、历史选择及下载缓存操作。切回长文时合并精调后的文本。
+- 旧项目默认以全文展示，已有段落与待添加草稿均保留；全新字段为可选，旧项目可以直接读取。重新分段时未使用的段落历史保留在项目内，不删除对应音频。
+- 保留精确匹配的片段以减少重做；修改导致分段边界变化时，受影响片段仍需重新生成。
 
 ## 0.3.1：修复实际 CosyVoice 返回格式，加入 Qwen-TTS
 
@@ -91,10 +102,10 @@ macOS 13+，Swift 5.9+ / Xcode Command Line Tools。
 swift test  # 完整 Xcode 环境
 # 仅有 Command Line Tools：bash scripts/test-core.sh
 bash scripts/build-app.sh
-open dist/KongVox-0.3.1/KongVox.app
+open dist/KongVox-0.4/KongVox.app
 ```
 
-产出 `dist/KongVox-0.3.1/KongVox.app` 与 `dist/KongVox-0.3.1-Mac.zip`，按当前 Mac 架构构建。本地交付为 Apple Silicon 版本，使用 ad-hoc 签名，尚未 Developer ID 公证。
+产出 `dist/KongVox-0.4/KongVox.app` 与 `dist/KongVox-0.4-Mac.zip`，按当前 Mac 架构构建。本地交付为 Apple Silicon 版本，使用 ad-hoc 签名，尚未 Developer ID 公证。
 
 ## 数据
 

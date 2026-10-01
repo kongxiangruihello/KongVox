@@ -46,6 +46,32 @@ struct Project: Codable, Identifiable {
     var settings = VoiceSettings()
     var segments: [Segment] = []
     var draft = ""
+    // Optional fields keep older projects readable without a destructive migration.
+    var longMode: Bool?
+    var longText: String?
+    var preparedLongText: String?
+    var archivedSegments: [Segment]?
+    var isLongMode: Bool { longMode ?? true }
+    var fullText: String { longText ?? (segments.map(\.text) + (draft.isEmpty ? [] : [draft])).joined(separator: "\n\n") }
+    var chunkLimit: Int { settings.resolvedService.kind == .qwenTTS ? 500 : 700 }
+    var needsLongPreparation: Bool {
+        fullText != (preparedLongText ?? segments.map(\.text).joined(separator: "\n\n")) ||
+        !draft.isEmpty || segments.contains { $0.spokenText.count > chunkLimit }
+    }
+    mutating func prepareLongDocument() {
+        let text = fullText
+        if !needsLongPreparation { longText = text; preparedLongText = text; return }
+        var available = segments + (archivedSegments ?? [])
+        // Reuse unchanged segments, including their history, pronunciation overrides and recovery IDs.
+        segments = TextSplitter.split(text, limit: chunkLimit).map { piece in
+            if let index = available.firstIndex(where: { $0.text == piece && $0.spokenText.count <= chunkLimit }) {
+                return available.remove(at: index)
+            }
+            return Segment(text: piece)
+        }
+        archivedSegments = available
+        longText = text; preparedLongText = text; draft = ""
+    }
 }
 enum TextSplitter {
     static func split(_ text: String, limit: Int = 700) -> [String] {

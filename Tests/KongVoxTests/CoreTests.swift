@@ -208,7 +208,11 @@ final class SpeechTests: XCTestCase {
                 print("Real cached WAV verified: \(pcm.count / 2) frames, \(Double(pcm.count) / 48000) seconds")
             }
         }
-        print("PASS: 30 test groups; observed CosyVoice header and Qwen models/migration; persistent download recovery, safe diagnostics, SRT timing; WAV streaming headers and normalization; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
+        let document = LongDocumentTests()
+        try document.testLegacyAndModeSwitching()
+        try document.testReuseAndServiceLimits()
+        try await document.testFullGenerationResumeAndExport()
+        print("PASS: 33 test groups; long document preservation/reuse/resume/full export; observed CosyVoice header and Qwen models/migration; persistent download recovery, safe diagnostics, SRT timing; WAV streaming headers and normalization; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
     }
 }
 #endif

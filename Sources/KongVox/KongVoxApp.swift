@@ -28,12 +28,12 @@ struct StudioView: View {
                     ForEach(studio.projects) { p in
                         VStack(alignment: .leading, spacing: 6) {
                             Text(p.title).font(.headline).lineLimit(1)
-                            Text("\(p.settings.mode) · \(p.segments.count) 段").font(.caption).foregroundStyle(.secondary)
+                            Text(p.isLongMode ? "长文 · \(p.fullText.count) 字" : "段落 · \(p.segments.count) 段").font(.caption).foregroundStyle(.secondary)
                         }.padding(.vertical, 6).tag(p.id)
                     }
                 }.listStyle(.sidebar).disabled(studio.busy)
                 Button { state.showSettings = true } label: { Label("服务设置", systemImage: "key") }.disabled(studio.busy)
-                Text("KongVox 0.3.1 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
+                Text("KongVox 0.4 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
             }.padding(18).navigationSplitViewColumnWidth(230)
         } detail: {
             VStack(spacing: 0) {
@@ -41,6 +41,28 @@ struct StudioView: View {
                     HStack(alignment: .top, spacing: 0) {
                         VStack(alignment: .leading, spacing: 18) {
                             TextField("项目名称", text: bind(\.title, fallback: "")).font(.system(size: 28, weight: .bold)).textFieldStyle(.plain)
+                            Picker("编辑方式", selection: Binding(get: { p.isLongMode }, set: { studio.setLongMode($0) })) {
+                                Text("长文模式").tag(true)
+                                Text("段落精调").tag(false)
+                            }.pickerStyle(.segmented).frame(maxWidth: 280)
+                            if p.isLongMode {
+                                HStack {
+                                    Text("完整文章").font(.headline)
+                                    Spacer()
+                                    Text("\(p.fullText.count) 字").font(.caption).foregroundStyle(.secondary)
+                                }
+                                Text("粘贴整篇文章，点击「生成全文」。后台自动处理，完成后试听或导出一份完整音频。").font(.caption).foregroundStyle(.secondary)
+                                TextEditor(text: Binding(get: { studio.project?.fullText ?? "" }, set: { text in studio.edit { $0.longText = text } }))
+                                    .font(.system(size: 16)).lineSpacing(6).padding(12)
+                                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+                                    .accessibilityLabel("完整文章编辑区")
+                                HStack {
+                                    ProgressView(value: studio.fullProgress).frame(width: 150)
+                                    Text(studio.fullAudioReady ? "全文配音已就绪" : p.needsLongPreparation ? "文稿待生成" : "全文进度 \(Int(studio.fullProgress * 100))%")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                Text("需要发音修正、单段重做或处理下载缓存时，可切换「段落精调」。").font(.caption2).foregroundStyle(.secondary)
+                            } else {
                             HStack { Text("配音文稿").font(.headline); Spacer(); Text("\(p.segments.reduce(0) { $0 + $1.spokenText.count }) 字 · \(p.segments.filter { studio.ready($0, settings: p.settings) }.count)/\(p.segments.count) 段就绪").font(.caption).foregroundStyle(.secondary) }
                             ScrollView {
                                 LazyVStack(spacing: 14) {
@@ -54,6 +76,7 @@ struct StudioView: View {
                                         Button("添加为配音段落") { studio.importDraft() }.disabled(p.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                                     }.padding(18).background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 14))
                                 }
+                            }
                             }
                         }.padding(26).disabled(studio.busy)
                         Divider()
@@ -105,14 +128,14 @@ struct StudioView: View {
             }
             Picker("段间停顿", selection: bind(\.settings.pause, fallback: 0.35)) { Text("紧凑 · 0.15 秒").tag(0.15); Text("标准 · 0.35 秒").tag(0.35); Text("舒缓 · 0.7 秒").tag(0.7) }
             Divider()
-            Text("先生成一段试听，再生成全文。每段可保留多个版本。改变声音、语速或表达要求后，需要重新生成。").font(.caption).foregroundStyle(.secondary)
+            Text(p.isLongMode ? "全文会自动分批合成并合并。中断后点击「生成全文」继续，已完成且未修改的内容会复用。" : "每段可保留多个版本。改变声音、语速或表达要求后，需要重新生成。").font(.caption).foregroundStyle(.secondary)
             Text("生成时，朗读文本将发送至 \(p.settings.resolvedService.name)（\(p.settings.resolvedService.endpointHost)），并按你的 API 账户计费。试听已有音频与导出不产生生成费用。").font(.caption).foregroundStyle(.secondary)
             Spacer()
         }.textFieldStyle(.roundedBorder) }
     }
     func footer(_ p: Project) -> some View {
         HStack(spacing: 14) {
-            Button { studio.playAll() } label: { Image(systemName: "play.circle.fill").font(.title) }.buttonStyle(.plain).disabled(studio.busy || p.segments.isEmpty)
+            Button { studio.playAll() } label: { Image(systemName: "play.circle.fill").font(.title) }.buttonStyle(.plain).help("试听完整音频").disabled(studio.busy || !studio.fullAudioReady)
             if studio.player != nil {
                 Button(studio.playing ? "暂停" : "继续") { studio.togglePause() }
                 Button("停止") { studio.stop() }
@@ -125,14 +148,14 @@ struct StudioView: View {
             if studio.busy {
                 if studio.activeSegment != nil { Button("取消生成") { studio.cancel() } }
             } else {
-                Menu("导出音频") {
+                Menu(p.isLongMode ? "导出完整音频" : "导出音频") {
                     Button("SRT · 段落字幕") { studio.exportSubtitles() }
                     Divider()
                     Button("WAV · 无损剪辑") { studio.export(format: "wav") }
                     Button("M4A · 小体积") { studio.export(format: "m4a") }
                     Button(Studio.ffmpeg == nil ? "MP3 · 需安装 FFmpeg" : "MP3 · 通用分享") { studio.export(format: "mp3") }.disabled(Studio.ffmpeg == nil)
-                }.fixedSize().disabled(p.segments.isEmpty)
-                Button("生成待更新段落") { studio.generate() }.buttonStyle(.borderedProminent).disabled(p.segments.isEmpty)
+                }.fixedSize().disabled(!studio.fullAudioReady)
+                Button(p.isLongMode ? "生成全文" : "生成待更新段落") { studio.generate() }.buttonStyle(.borderedProminent).disabled(p.isLongMode ? p.fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : p.segments.isEmpty)
             }
         }.padding(18)
     }

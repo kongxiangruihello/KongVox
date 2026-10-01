@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 export CLANG_MODULE_CACHE_PATH="${TMPDIR:-/tmp}/kongvox-clang-cache"
 swift build -c release --disable-sandbox
 BIN_DIR="$(swift build -c release --show-bin-path --disable-sandbox)"
-APP="$PWD/dist/KongVox-0.3.1/KongVox.app"
+APP="$PWD/dist/KongVox-0.4/KongVox.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/KongVox" "$APP/Contents/MacOS/KongVox"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -16,13 +16,13 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>KongVox</string>
 <key>CFBundleDisplayName</key><string>KongVox</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.3.1</string>
-<key>CFBundleVersion</key><string>6</string>
+<key>CFBundleShortVersionString</key><string>0.4</string>
+<key>CFBundleVersion</key><string>7</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST
 codesign --force --deep --sign - "$APP"
-ditto -c -k --sequesterRsrc --keepParent "$APP" "$PWD/dist/KongVox-0.3.1-Mac.zip"
+ditto -c -k --sequesterRsrc --keepParent "$APP" "$PWD/dist/KongVox-0.4-Mac.zip"
 echo "Built: $APP"
