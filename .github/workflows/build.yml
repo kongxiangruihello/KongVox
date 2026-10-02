@@ -11,7 +11,14 @@ jobs:
         run: swift test
       - name: Package app
         run: bash scripts/build-app.sh
+      - name: Package installer
+        run: |
+          python3 -m venv /tmp/kongvox-dmg-env
+          /tmp/kongvox-dmg-env/bin/pip install ds_store==1.3.1 mac-alias==2.2.2
+          DMG_PYTHON=/tmp/kongvox-dmg-env/bin/python3 bash scripts/build-dmg.sh
       - uses: actions/upload-artifact@v4
         with:
           name: KongVox-Mac
-          path: dist/KongVox-0.4-Mac.zip
+          path: |
+            dist/KongVox-0.7-Mac.zip
+            dist/KongVox-0.7-Mac.dmg

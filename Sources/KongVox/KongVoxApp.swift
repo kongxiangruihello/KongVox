@@ -11,7 +11,12 @@ import SwiftUI
     }
 }
 final class ViewState: ObservableObject {
+    @Published var showFinishedReview = false
+    @Published var showTools = false
+    @Published var showReview = false
     @Published var showSettings = false
+    @Published var showWelcome = false
+    var configureAfterWelcome = false
     @Published var key = ""
     @Published var message = ""
 }
@@ -21,7 +26,7 @@ struct StudioView: View {
     var body: some View {
         NavigationSplitView {
             VStack(alignment: .leading, spacing: 20) {
-                Label("KongVox", systemImage: "waveform.circle.fill").font(.system(size: 25, weight: .bold)).foregroundStyle(.indigo)
+                HStack(spacing: 8) { BrandIcon(size: 38); Text("KongVox") }.font(.system(size: 25, weight: .bold)).foregroundStyle(.indigo)
                 Text("让文字，有自己的声音。 ").font(.caption).foregroundStyle(.secondary)
                 Button(action: studio.newProject) { Label("新建配音", systemImage: "plus").frame(maxWidth: .infinity) }.controlSize(.large).disabled(studio.busy)
                 List(selection: $studio.selected) {
@@ -33,7 +38,14 @@ struct StudioView: View {
                     }
                 }.listStyle(.sidebar).disabled(studio.busy)
                 Button { state.showSettings = true } label: { Label("服务设置", systemImage: "key") }.disabled(studio.busy)
-                Text("KongVox 0.4 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
+                Button("成品检查 / 对比") { state.showFinishedReview = true }
+                Menu("项目备份") {
+                    Button("备份当前项目…") { studio.chooseBackup() }
+                    Button("从备份恢复为新项目…") { studio.chooseRestore() }
+                }.disabled(studio.busy)
+                Button("长文工作台 / 任务") { state.showTools = true }
+                Button("使用指南") { state.showWelcome = true }.font(.caption)
+                Text("KongVox 0.7 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
             }.padding(18).navigationSplitViewColumnWidth(230)
         } detail: {
             VStack(spacing: 0) {
@@ -88,9 +100,21 @@ struct StudioView: View {
             }.background(Color(nsColor: .windowBackgroundColor))
         }
         .tint(.indigo)
+        .onAppear { state.showWelcome = !UserDefaults.standard.bool(forKey: "welcomeSeen05") }
+        .sheet(isPresented: $state.showWelcome, onDismiss: {
+            if state.configureAfterWelcome { state.configureAfterWelcome = false; state.showSettings = true }
+        }) {
+            WelcomeView(configure: { state.configureAfterWelcome = true; finishWelcome() }, start: { finishWelcome() })
+        }
+        .sheet(isPresented: $state.showFinishedReview) { FinishedReview().environmentObject(studio) }
+        .sheet(isPresented: $state.showTools) { LongFormWorkbench().environmentObject(studio) }
+        .sheet(isPresented: $state.showReview) { GenerationReview().environmentObject(studio) }
         .sheet(isPresented: $state.showSettings) { ServiceSettings().environmentObject(studio) }
-        .onChange(of: studio.selected) { _ in studio.stop() }
+        .onChange(of: studio.selected) { _ in studio.stop(); studio.findings = []; studio.qualitySummary = "尚未检查" }
         .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil }; if !studio.diagnostic.isEmpty { Button("复制诊断") { studio.copyDiagnostic(); studio.error = nil } } } message: { Text(studio.error ?? "") }
+    }
+    func finishWelcome() {
+        UserDefaults.standard.set(true, forKey: "welcomeSeen05"); state.showWelcome = false
     }
     func bind<T>(_ key: WritableKeyPath<Project,T>, fallback: T) -> Binding<T> {
         Binding(get: { studio.project?[keyPath: key] ?? fallback }, set: { value in studio.edit { $0[keyPath: key] = value } })
@@ -127,6 +151,9 @@ struct StudioView: View {
                 TextField("例如：像朋友聊天，重点轻微强调", text: bind(\.settings.direction, fallback: ""), axis: .vertical).lineLimit(3...6)
             }
             Picker("段间停顿", selection: bind(\.settings.pause, fallback: 0.35)) { Text("紧凑 · 0.15 秒").tag(0.15); Text("标准 · 0.35 秒").tag(0.35); Text("舒缓 · 0.7 秒").tag(0.7) }
+            Toggle("统一音量", isOn: Binding(get: { p.levelsEnabled }, set: { enabled in studio.edit { $0.normalizeVolume = enabled } }))
+            Text("仅在合并试听和导出时调整，保留原始音频。自然段保留停顿，后台切分处减少多余空白。").font(.caption2).foregroundStyle(.secondary)
+            Toggle("全文完成后通知我", isOn: Binding(get: { studio.notificationsEnabled }, set: { studio.setNotifications($0) }))
             Divider()
             Text(p.isLongMode ? "全文会自动分批合成并合并。中断后点击「生成全文」继续，已完成且未修改的内容会复用。" : "每段可保留多个版本。改变声音、语速或表达要求后，需要重新生成。").font(.caption).foregroundStyle(.secondary)
             Text("生成时，朗读文本将发送至 \(p.settings.resolvedService.name)（\(p.settings.resolvedService.endpointHost)），并按你的 API 账户计费。试听已有音频与导出不产生生成费用。").font(.caption).foregroundStyle(.secondary)
@@ -134,6 +161,18 @@ struct StudioView: View {
         }.textFieldStyle(.roundedBorder) }
     }
     func footer(_ p: Project) -> some View {
+        let usage = studio.usageEstimate
+        return VStack(alignment: .leading, spacing: 10) {
+            if studio.playbackDuration > 0 {
+                HStack(spacing: 12) {
+                    Button { studio.skip(-10) } label: { Image(systemName: "gobackward.10") }.help("后退 10 秒")
+                    Text(Studio.timeLabel(studio.playbackTime)).monospacedDigit().font(.caption)
+                    Slider(value: Binding(get: { studio.playbackTime }, set: { studio.seek($0) }), in: 0...max(0.01, studio.playbackDuration)).accessibilityLabel("播放进度")
+                    Text(Studio.timeLabel(studio.playbackDuration)).monospacedDigit().font(.caption)
+                    Button { studio.skip(10) } label: { Image(systemName: "goforward.10") }.help("前进 10 秒")
+                }.disabled(studio.busy)
+            }
+            Text("预计本次合成 \(usage.generate) 字 · 可复用 \(usage.reuse) 字 · 待恢复 \(usage.recover) 字（按服务商实际计费）").font(.caption).foregroundStyle(.secondary)
         HStack(spacing: 14) {
             Button { studio.playAll() } label: { Image(systemName: "play.circle.fill").font(.title) }.buttonStyle(.plain).help("试听完整音频").disabled(studio.busy || !studio.fullAudioReady)
             if studio.player != nil {
@@ -146,17 +185,21 @@ struct StudioView: View {
             }
             Spacer()
             if studio.busy {
-                if studio.activeSegment != nil { Button("取消生成") { studio.cancel() } }
+                if studio.activeSegment != nil { Button(studio.pauseRequested ? "等待暂停…" : "本段后暂停") { studio.pauseAfterSegment() }.disabled(studio.pauseRequested); Button("取消生成") { studio.cancel() } }
             } else {
                 Menu(p.isLongMode ? "导出完整音频" : "导出音频") {
+                    Button("音频 + 字幕组合包 · ZIP") { studio.exportBundle() }
+                    Divider()
                     Button("SRT · 段落字幕") { studio.exportSubtitles() }
                     Divider()
                     Button("WAV · 无损剪辑") { studio.export(format: "wav") }
                     Button("M4A · 小体积") { studio.export(format: "m4a") }
                     Button(Studio.ffmpeg == nil ? "MP3 · 需安装 FFmpeg" : "MP3 · 通用分享") { studio.export(format: "mp3") }.disabled(Studio.ffmpeg == nil)
                 }.fixedSize().disabled(!studio.fullAudioReady)
-                Button(p.isLongMode ? "生成全文" : "生成待更新段落") { studio.generate() }.buttonStyle(.borderedProminent).disabled(p.isLongMode ? p.fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : p.segments.isEmpty)
+                Button("试听开头") { studio.generateOpening() }.disabled(p.isLongMode ? p.fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : p.segments.isEmpty)
+                Button(p.isLongMode ? "生成全文" : "生成待更新段落") { studio.prepareReview(); state.showReview = true }.buttonStyle(.borderedProminent).disabled(p.isLongMode ? p.fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : p.segments.isEmpty)
             }
+        }
         }.padding(18)
     }
 }
