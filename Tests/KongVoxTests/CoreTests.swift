@@ -228,7 +228,14 @@ final class SpeechTests: XCTestCase {
         try v07.testBackupRejectsCorruptionAndPaths()
         try await v07.testLongTextStress()
         try v07.testLongAudioStreaming()
-        print("PASS: 46 test groups; timeline/highlighting, audition/adoption, backup isolation/corruption, 10k/30k text stress; anchored edits, chapters, dictionary precedence/persistence/invalidation, graceful pause/restart, chapter scope/redo and quality findings; natural joins, level matching, ZIP/SRT shared timeline, opening reuse, usage estimates and seek; long document preservation/reuse/resume/full export; observed CosyVoice header and Qwen models/migration; persistent download recovery, safe diagnostics, SRT timing; WAV streaming headers and normalization; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
+        let v08 = Version08Tests()
+        try await v08.testVolcengineRequestAndStream()
+        try v08.testImportFormatsAndFiltering()
+        try v08.testPresetsAndImportPersistence()
+        try await v08.testMultiProjectQueueFailureResumeAndLocks()
+        try await v08.testQueuePauseAndStopOnFailure()
+        try v08.testBatchExportAndRollback()
+        print("PASS: 52 test groups; Volcengine SSE, document import, presets, multi-project queue, batch delivery; timeline/highlighting, audition/adoption, backup isolation/corruption, 10k/30k text stress; anchored edits, chapters, dictionary precedence/persistence/invalidation, graceful pause/restart, chapter scope/redo and quality findings; natural joins, level matching, ZIP/SRT shared timeline, opening reuse, usage estimates and seek; long document preservation/reuse/resume/full export; observed CosyVoice header and Qwen models/migration; persistent download recovery, safe diagnostics, SRT timing; WAV streaming headers and normalization; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
     }
 }
 #endif

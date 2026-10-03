@@ -20,11 +20,11 @@ struct FinishedReview: View {
             }
             Text("点击文稿从对应片段播放；高亮按片段时间轴跟随，不是逐字对齐。修改原稿前请返回主界面。").font(.caption).foregroundStyle(.secondary)
             HStack {
-                Button("播放全文") { studio.playAll() }.disabled(studio.busy || !canPlay)
-                Button(studio.playing ? "暂停" : "继续") { studio.togglePause() }.disabled(studio.player == nil || studio.busy)
-                Button("停止") { studio.stop() }.disabled(studio.busy)
+                Button("播放全文") { studio.playAll() }.disabled(studio.isWorking || !canPlay)
+                Button(studio.playing ? "暂停" : "继续") { studio.togglePause() }.disabled(studio.player == nil || studio.isWorking)
+                Button("停止") { studio.stop() }.disabled(studio.isWorking)
                 Spacer()
-                Button("检查音频") { studio.inspectAudio() }.disabled(studio.busy)
+                Button("检查音频") { studio.inspectAudio() }.disabled(studio.isWorking)
                 Text(studio.qualitySummary).font(.caption).lineLimit(1)
             }
             if studio.playbackDuration > 0 {
@@ -34,7 +34,7 @@ struct FinishedReview: View {
                     Slider(value: Binding(get: { studio.playbackTime }, set: { studio.seek($0) }), in: 0...max(0.01, studio.playbackDuration)).accessibilityLabel("成品播放进度")
                     Text(Studio.timeLabel(studio.playbackDuration)).monospacedDigit()
                     Button("+10 秒") { studio.skip(10) }
-                }.disabled(studio.busy)
+                }.disabled(studio.isWorking)
             }
             ScrollViewReader { proxy in
                 ScrollView {
@@ -46,16 +46,16 @@ struct FinishedReview: View {
                                         Text("片段 \(index + 1)").font(.caption).foregroundStyle(.secondary)
                                         if studio.readingSegment == segment.id { Label("当前播放", systemImage: "speaker.wave.2.fill").font(.caption).foregroundStyle(.indigo) }
                                         Spacer()
-                                        Button("修复 / 版本对比") { state.repairID = segment.id; state.showRepair = true }.disabled(studio.busy)
+                                        Button("修复 / 版本对比") { state.repairID = segment.id; state.showRepair = true }.disabled(studio.isWorking)
                                     }
                                     Button { studio.playAll(from: segment.id) } label: {
                                         Text(segment.text).frame(maxWidth: .infinity, alignment: .leading).multilineTextAlignment(.leading).lineSpacing(5)
-                                    }.buttonStyle(.plain).disabled(studio.busy || !canPlay)
+                                    }.buttonStyle(.plain).disabled(studio.isWorking || !canPlay)
                                     ForEach(studio.findings.filter { $0.segmentID == segment.id }) { finding in
                                         HStack(alignment: .top) {
                                             Label(finding.message, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
                                             Spacer()
-                                            Button("复听") { studio.playFinding(finding) }.disabled(studio.busy || segment.current == nil)
+                                            Button("复听") { studio.playFinding(finding) }.disabled(studio.isWorking || segment.current == nil)
                                         }
                                     }
                                 }.padding(14)
@@ -91,19 +91,19 @@ struct SegmentRepair: View {
     var dirty: Bool { state.pronunciation != segment?.pronunciation }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack { Text("修复与版本对比").font(.title2.bold()); Spacer(); Button("完成") { dismiss() }.disabled(studio.busy) }
+            HStack { Text("修复与版本对比").font(.title2.bold()); Spacer(); Button("完成") { dismiss() }.disabled(studio.isWorking) }
             if let segment, let p = studio.project {
                 Text("原文 / 字幕").font(.headline)
                 ScrollView { Text(segment.text).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }.frame(maxHeight: 100)
                 Text("完整替代读法（留空恢复按原文朗读）").font(.headline)
-                TextEditor(text: $state.pronunciation).frame(height: 90).border(.quaternary).disabled(studio.busy)
+                TextEditor(text: $state.pronunciation).frame(height: 90).border(.quaternary).disabled(studio.isWorking)
                 HStack {
-                    Button("保存读法") { studio.updatePronunciation(segmentID, text: state.pronunciation) }.disabled(studio.busy || !dirty)
+                    Button("保存读法") { studio.updatePronunciation(segmentID, text: state.pronunciation) }.disabled(studio.isWorking || !dirty)
                     Button("生成新版本并试听") {
                         studio.updatePronunciation(segmentID, text: state.pronunciation)
                         studio.generate(only: segmentID, audition: true)
-                    }.disabled(studio.busy || (p.isLongMode && p.needsLongPreparation))
-                    if studio.busy && studio.activeSegment == segmentID { Button("取消") { studio.cancel() } }
+                    }.disabled(studio.isWorking || (p.isLongMode && p.needsLongPreparation))
+                    if studio.isWorking && studio.activeSegment == segmentID { Button("取消") { studio.cancel() } }
                 }
                 Text("新版本先保留供对比，点击「采用」才进入成品。旧版本即使不匹配当前设置，仍可试听；关闭前请保存读法。").font(.caption).foregroundStyle(.secondary)
                 List {
@@ -114,9 +114,9 @@ struct SegmentRepair: View {
                                 Text(take.date.formatted(date: .abbreviated, time: .standard)).font(.caption)
                                 Spacer()
                                 if take.id == segment.selectedTake { Text("已采用").foregroundStyle(.green) }
-                                Button("试听") { studio.play(studio.audioURL(take)) }.disabled(studio.busy)
+                                Button("试听") { studio.play(studio.audioURL(take)) }.disabled(studio.isWorking)
                                 Button("采用") { studio.adoptTake(segmentID: segmentID, takeID: take.id) }
-                                    .disabled(studio.busy || dirty || take.fingerprint != segment.fingerprint(p.settings) || take.id == segment.selectedTake)
+                                    .disabled(studio.isWorking || dirty || take.fingerprint != segment.fingerprint(p.settings) || take.id == segment.selectedTake)
                             }
                             Text("\(take.settings?.voice ?? p.settings.voice) · \(take.service?.name ?? "历史服务")").font(.caption).foregroundStyle(.secondary)
                             Text(take.spokenText ?? segment.spokenText).font(.caption).lineLimit(2)
@@ -127,7 +127,7 @@ struct SegmentRepair: View {
             HStack {
                 if studio.player != nil { Button(studio.playing ? "暂停试听" : "继续试听") { studio.togglePause() }; Button("停止试听") { studio.stop() } }
                 Text(studio.status).font(.caption).foregroundStyle(.secondary)
-            }.disabled(studio.busy)
+            }.disabled(studio.isWorking)
         }.padding(24).frame(width: 780, height: 620)
         .onAppear { state.pronunciation = segment?.pronunciation ?? "" }
         .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil } } message: { Text(studio.error ?? "") }

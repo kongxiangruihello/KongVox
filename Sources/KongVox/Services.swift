@@ -46,6 +46,7 @@ struct SpeechClient {
         guard settings.speed.isFinite, (0.7...1.3).contains(settings.speed) else { throw VoxError(message: "语速超出支持范围。") }
         let path: String
         switch profile.kind {
+        case .volcengine: path = "/tts/unidirectional/sse"
         case .gemini: path = "/models/\(profile.model):generateContent"
         case .qwenTTS: path = "/services/aigc/multimodal-generation/generation"
         case .cosyVoice: path = "/services/audio/tts/SpeechSynthesizer"
@@ -56,7 +57,14 @@ struct SpeechClient {
         request.httpMethod = "POST"; request.timeoutInterval = 180
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: Any]
-        if profile.kind == .gemini {
+        if profile.kind == .volcengine {
+            request.setValue(key, forHTTPHeaderField: "X-Api-Key")
+            request.setValue(profile.model, forHTTPHeaderField: "X-Api-Resource-Id")
+            request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Api-Request-Id")
+            request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+            body = ["user": ["uid": "kongvox"], "req_params": ["text": text, "speaker": settings.voice,
+                "audio_params": ["format": "pcm", "sample_rate": 24000, "speech_rate": Int(((settings.speed - 1) * 100).rounded())]]]
+        } else if profile.kind == .gemini {
             request.setValue(key, forHTTPHeaderField: "x-goog-api-key")
             let style = settings.instructions + " 语速目标为正常速度的 \(settings.speed) 倍。"
             let part: [String: Any] = profile.modernGemini ? ["text": text, "speech_metadata": ["style": style]] : ["text": "请按以下要求朗读，仅读出正文。\n表达要求：\(style)\n正文：\n\(text)"]
@@ -116,6 +124,7 @@ struct SpeechClient {
             return try await download(url, recoveryFile: recoveryFile)
         }
         try Task.checkCancellation()
+        if settings.resolvedService.kind == .volcengine { return try VolcengineAudio.decode(data) }
         if settings.resolvedService.kind == .gemini { return try Self.geminiPCM(data) }
         return try Self.audioPCM(data, mime: http.value(forHTTPHeaderField: "Content-Type") ?? "")
     }

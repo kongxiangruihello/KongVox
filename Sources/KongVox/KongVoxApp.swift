@@ -7,10 +7,11 @@ import SwiftUI
             StudioView().environmentObject(studio).frame(minWidth: 1060, minHeight: 700)
         }
         .defaultSize(width: 1240, height: 820)
-        .commands { CommandGroup(replacing: .newItem) { Button("新建配音") { studio.newProject() }.keyboardShortcut("n").disabled(studio.busy) } }
+        .commands { CommandGroup(replacing: .newItem) { Button("新建配音") { studio.newProject() }.keyboardShortcut("n").disabled(studio.isWorking) } }
     }
 }
 final class ViewState: ObservableObject {
+    @Published var showBatch = false
     @Published var showFinishedReview = false
     @Published var showTools = false
     @Published var showReview = false
@@ -28,7 +29,7 @@ struct StudioView: View {
             VStack(alignment: .leading, spacing: 20) {
                 HStack(spacing: 8) { BrandIcon(size: 38); Text("KongVox") }.font(.system(size: 25, weight: .bold)).foregroundStyle(.indigo)
                 Text("让文字，有自己的声音。 ").font(.caption).foregroundStyle(.secondary)
-                Button(action: studio.newProject) { Label("新建配音", systemImage: "plus").frame(maxWidth: .infinity) }.controlSize(.large).disabled(studio.busy)
+                Button(action: studio.newProject) { Label("新建配音", systemImage: "plus").frame(maxWidth: .infinity) }.controlSize(.large).disabled(studio.isWorking)
                 List(selection: $studio.selected) {
                     ForEach(studio.projects) { p in
                         VStack(alignment: .leading, spacing: 6) {
@@ -36,16 +37,17 @@ struct StudioView: View {
                             Text(p.isLongMode ? "长文 · \(p.fullText.count) 字" : "段落 · \(p.segments.count) 段").font(.caption).foregroundStyle(.secondary)
                         }.padding(.vertical, 6).tag(p.id)
                     }
-                }.listStyle(.sidebar).disabled(studio.busy)
-                Button { state.showSettings = true } label: { Label("服务设置", systemImage: "key") }.disabled(studio.busy)
+                }.listStyle(.sidebar).disabled(studio.isWorking)
+                Button { state.showSettings = true } label: { Label("服务设置", systemImage: "key") }.disabled(studio.isWorking)
                 Button("成品检查 / 对比") { state.showFinishedReview = true }
                 Menu("项目备份") {
                     Button("备份当前项目…") { studio.chooseBackup() }
                     Button("从备份恢复为新项目…") { studio.chooseRestore() }
-                }.disabled(studio.busy)
+                }.disabled(studio.isWorking)
+                Button("文稿导入 / 批量工作台") { state.showBatch = true }
                 Button("长文工作台 / 任务") { state.showTools = true }
                 Button("使用指南") { state.showWelcome = true }.font(.caption)
-                Text("KongVox 0.7 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
+                Text("KongVox 0.8.1 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
             }.padding(18).navigationSplitViewColumnWidth(230)
         } detail: {
             VStack(spacing: 0) {
@@ -53,10 +55,20 @@ struct StudioView: View {
                     HStack(alignment: .top, spacing: 0) {
                         VStack(alignment: .leading, spacing: 18) {
                             TextField("项目名称", text: bind(\.title, fallback: "")).font(.system(size: 28, weight: .bold)).textFieldStyle(.plain)
-                            Picker("编辑方式", selection: Binding(get: { p.isLongMode }, set: { studio.setLongMode($0) })) {
-                                Text("长文模式").tag(true)
-                                Text("段落精调").tag(false)
-                            }.pickerStyle(.segmented).frame(maxWidth: 280)
+                            HStack(spacing: 12) {
+                                Picker("编辑方式", selection: Binding(get: { p.isLongMode }, set: { studio.setLongMode($0) })) {
+                                    Text("长文模式").tag(true)
+                                    Text("段落精调").tag(false)
+                                }.pickerStyle(.segmented).labelsHidden().frame(width: 220)
+                                Button(p.isLongMode ? "生成全文" : "生成待更新") {
+                                    studio.prepareReview(); state.showReview = true
+                                }.buttonStyle(.borderedProminent).fixedSize()
+                                    .help("检查生成范围后，生成所有待更新内容")
+                                    .disabled(p.isLongMode ? p.fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : p.segments.isEmpty)
+                                Button { studio.playAll() } label: { Label("播放", systemImage: "play.fill") }
+                                    .fixedSize().help("播放完整配音").disabled(!studio.fullAudioReady)
+                                Spacer(minLength: 0)
+                            }
                             if p.isLongMode {
                                 HStack {
                                     Text("完整文章").font(.headline)
@@ -90,9 +102,9 @@ struct StudioView: View {
                                 }
                             }
                             }
-                        }.padding(26).disabled(studio.busy)
+                        }.padding(26).disabled(studio.isWorking)
                         Divider()
-                        settingsPanel(p).frame(width: 250).padding(22).disabled(studio.busy)
+                        settingsPanel(p).frame(width: 250).padding(22).disabled(studio.isWorking)
                     }
                     Divider()
                     footer(p)
@@ -106,6 +118,7 @@ struct StudioView: View {
         }) {
             WelcomeView(configure: { state.configureAfterWelcome = true; finishWelcome() }, start: { finishWelcome() })
         }
+        .sheet(isPresented: $state.showBatch) { BatchWorkbench().environmentObject(studio) }
         .sheet(isPresented: $state.showFinishedReview) { FinishedReview().environmentObject(studio) }
         .sheet(isPresented: $state.showTools) { LongFormWorkbench().environmentObject(studio) }
         .sheet(isPresented: $state.showReview) { GenerationReview().environmentObject(studio) }
@@ -142,6 +155,7 @@ struct StudioView: View {
             }
             VStack(alignment: .leading, spacing: 8) {
                 Text("表达要求")
+                if p.settings.resolvedService.kind == .volcengine { Text("火山引擎使用资源 ID 选择模型，支持语速；本版暂不应用表达要求。").font(.caption2).foregroundStyle(.secondary) }
                 if p.settings.resolvedService.kind == .qwenTTS {
                     Text("Qwen Flash 使用默认语速；Instruct Flash 才支持表达与语速提示。每段最多 600 字。").font(.caption2).foregroundStyle(.secondary)
                 }
@@ -170,22 +184,21 @@ struct StudioView: View {
                     Slider(value: Binding(get: { studio.playbackTime }, set: { studio.seek($0) }), in: 0...max(0.01, studio.playbackDuration)).accessibilityLabel("播放进度")
                     Text(Studio.timeLabel(studio.playbackDuration)).monospacedDigit().font(.caption)
                     Button { studio.skip(10) } label: { Image(systemName: "goforward.10") }.help("前进 10 秒")
-                }.disabled(studio.busy)
+                }.disabled(studio.isWorking)
             }
             Text("预计本次合成 \(usage.generate) 字 · 可复用 \(usage.reuse) 字 · 待恢复 \(usage.recover) 字（按服务商实际计费）").font(.caption).foregroundStyle(.secondary)
         HStack(spacing: 14) {
-            Button { studio.playAll() } label: { Image(systemName: "play.circle.fill").font(.title) }.buttonStyle(.plain).help("试听完整音频").disabled(studio.busy || !studio.fullAudioReady)
             if studio.player != nil {
                 Button(studio.playing ? "暂停" : "继续") { studio.togglePause() }
                 Button("停止") { studio.stop() }
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text(studio.status).font(.caption).lineLimit(2)
-                if studio.busy { ProgressView(value: studio.progress).frame(width: 180) }
+                if studio.isWorking { ProgressView(value: studio.progress).frame(width: 180) }
             }
             Spacer()
-            if studio.busy {
-                if studio.activeSegment != nil { Button(studio.pauseRequested ? "等待暂停…" : "本段后暂停") { studio.pauseAfterSegment() }.disabled(studio.pauseRequested); Button("取消生成") { studio.cancel() } }
+            if studio.isWorking {
+                if studio.activeSegment != nil { Button(studio.pauseRequested ? "等待暂停…" : "本段后暂停") { if studio.queueRunning { studio.pauseQueue() } else { studio.pauseAfterSegment() } }.disabled(studio.pauseRequested); Button("取消生成") { if studio.queueRunning { studio.pauseQueue() }; studio.cancel() } }
             } else {
                 Menu(p.isLongMode ? "导出完整音频" : "导出音频") {
                     Button("音频 + 字幕组合包 · ZIP") { studio.exportBundle() }
@@ -197,7 +210,6 @@ struct StudioView: View {
                     Button(Studio.ffmpeg == nil ? "MP3 · 需安装 FFmpeg" : "MP3 · 通用分享") { studio.export(format: "mp3") }.disabled(Studio.ffmpeg == nil)
                 }.fixedSize().disabled(!studio.fullAudioReady)
                 Button("试听开头") { studio.generateOpening() }.disabled(p.isLongMode ? p.fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : p.segments.isEmpty)
-                Button(p.isLongMode ? "生成全文" : "生成待更新段落") { studio.prepareReview(); state.showReview = true }.buttonStyle(.borderedProminent).disabled(p.isLongMode ? p.fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : p.segments.isEmpty)
             }
         }
         }.padding(18)

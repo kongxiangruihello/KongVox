@@ -96,11 +96,11 @@ final class CosyVoiceTests: XCTestCase {
         let old: [String: Any] = ["profiles": try JSONSerialization.jsonObject(with: JSONEncoder().encode([ServiceProfile.openAI, .gemini])), "defaultID": "openai"]
         try JSONSerialization.data(withJSONObject: old).write(to: dir.appendingPathComponent("services.json"))
         let studio = Studio(root: dir)
-        XCTAssertEqual(studio.catalog.profiles.count, 4)
+        XCTAssertEqual(studio.catalog.profiles.count, 5)
         XCTAssertEqual(studio.catalog.defaultID, "openai")
-        XCTAssertEqual(studio.catalog.profiles.last?.kind, .qwenTTS)
-        XCTAssertEqual(Studio(root: dir).catalog.profiles.count, 4)
+        XCTAssertEqual(studio.catalog.profiles.last?.kind, .volcengine)
+        XCTAssertEqual(Studio(root: dir).catalog.profiles.count, 5)
         try studio.deleteService(ServiceProfile.cosyVoice.id)
-        XCTAssertEqual(Studio(root: dir).catalog.profiles.count, 3)
+        XCTAssertEqual(Studio(root: dir).catalog.profiles.count, 4)
     }
 }

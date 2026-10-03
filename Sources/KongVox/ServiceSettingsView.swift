@@ -93,6 +93,7 @@ struct ServiceSettings: View {
                     }
                     Divider()
                     Menu("添加服务") {
+                        Button("火山引擎 豆包语音") { add(.volcengine) }
                         Button("Gemini 原生") { add(.gemini) }
                         Button("阿里云 CosyVoice") { add(.cosyVoice) }
                         Button("阿里云 Qwen-TTS") { add(.qwenTTS) }
@@ -152,12 +153,16 @@ struct ServiceSettings: View {
             Text(editor.profile.kind.rawValue).font(.caption).foregroundStyle(.secondary)
             Text("API 基础地址").font(.caption)
             TextField("https://…/v1 或 …/v1beta", text: $editor.profile.baseURL)
-            Text("模型名称").font(.caption)
+            Text(editor.profile.kind == .volcengine ? "资源 ID（选择模型及计费方式）" : "模型名称").font(.caption)
             TextField("TTS 模型 ID", text: $editor.profile.model)
             Menu("选择模型预设") {
                     ForEach(editor.profile.modelPresets, id: \.self) { model in Button(model) { editor.profile.model = model } }
                 }.fixedSize()
-            if editor.profile.kind == .gemini {
+            if editor.profile.kind == .volcengine {
+                Text("使用豆包语音新版控制台的 API Key（不是火山云 AccessKey/SecretKey）。默认 seed-tts-2.0，声音为 VV。资源 ID 与声音 ID 必须匹配；切换 1.0 后需填写对应音色。本版使用新版 Key 鉴权，不支持旧 AppID + Token。").font(.caption).foregroundStyle(.secondary)
+                Text("支持语速设置；本版暂不发送表达指令。中途失败不会采用残缺音频，重试可能重新计费。").font(.caption).foregroundStyle(.secondary)
+                Link("打开官方接口文档", destination: URL(string: "https://www.volcengine.com/docs/6561/1598757")!)
+            } else if editor.profile.kind == .gemini {
                 Text("使用 Google AI Studio API Key；gen-lang-client-… 是项目 ID，不能用作密钥。模型可用性取决于你的账户。").font(.caption).foregroundStyle(.secondary)
             } else if editor.profile.kind == .qwenTTS {
                 Text("使用百炼北京地域 API Key，需在此服务单独保存。Flash 用于标准朗读；Instruct Flash 支持表达要求和语速提示。标准 Flash 不应用语速与表达设置。每段最多 600 字，新导入文稿自动按不超过 500 字拆分。").font(.caption).foregroundStyle(.secondary)
@@ -180,6 +185,7 @@ struct ServiceSettings: View {
     func add(_ kind: ServiceKind) {
         var profile: ServiceProfile
         switch kind {
+        case .volcengine: profile = .volcengine
         case .gemini: profile = .gemini
         case .cosyVoice: profile = .cosyVoice
         case .qwenTTS: profile = .qwenTTS

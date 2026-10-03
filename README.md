@@ -1,6 +1,32 @@
-# KongVox 0.7
+# KongVox 0.8.1
 
 个人使用的原生 macOS 配音工作台，面向短视频口播与长文章。SwiftUI 编写，无第三方 Swift 依赖。
+
+## 0.8.1：编辑区快捷操作
+
+「生成全文」与完整配音「播放」按钮移到「长文模式 / 段落精调」切换器右侧，底部保留播放进度、暂停/继续、停止、开头试听及导出。段落精调时生成按钮显示「生成待更新」，仍先打开生成范围确认。未生成或已过期的音频不能完整播放，工作期间不能重复生成。
+
+下一版的五项精修方向保留在 [0.9 计划](ROADMAP.md)。
+
+## 0.8：批量长文与火山引擎
+
+从侧栏「文稿导入 / 批量工作台」进入：
+
+- **文稿导入**：TXT、Markdown、DOCX，可多选并预览全文；每份文件创建独立长文项目。可略过网址和 Markdown 脚注。Word 读取正文与可识别标题，不保留排版、图片、页眉或脚注正文。单文件最多 20 MB / 20 万字，一次最多 30 份。
+- **生成队列**：跨项目按顺序生成，显示所选服务与待处理字数，支持上下调整、失败时停止或继续其他项目、片段后暂停和跳过。开始前确认一次；失败不自动重试，重启后手动继续。再次开始会重新检查全部队列，复用已完成且未修改的音频。取消不能撤销已发生的服务费用。
+- **配音预设**：保存服务、音色、语速、表达要求、停顿与音量设置，用于当前或新项目；不含密钥和词典。服务配置改变后需重新保存预设。
+- **批量交付**：多选项目，按整篇或按章导出 WAV + SRT + 交付清单；名称包含顺序编号，字幕与音频使用相同时间轴。任何项目未就绪或导出失败时，不留下半份交付目录，也不覆盖已有文件夹。
+- **长文验收**：真实 CosyVoice v3-flash 合成 1854 字，16 个处理片段，完整音频 416.77 秒。已验证暂停、重新加载、续做不重复生成、完整 WAV/SRT 导出；本地规则检查无提示，仍建议人工复听漏读及听感。
+
+### 火山引擎 豆包语音
+
+服务设置已内置「火山引擎 豆包语音」。填写新版控制台 **API Key**，默认资源 ID `seed-tts-2.0`、VV 音色 `zh_female_vv_uranus_bigtts`。也可选 1.0 资源并填写对应声音 ID。资源、音色和账户权限需匹配；本版不支持旧 AppID + Token 或云 AccessKey/SecretKey。密钥仍存放在钥匙串。
+
+采用官方 V3 单向 SSE 合成接口，按顺序拼接 24 kHz PCM，仅在完整结束后保存音频；拒绝截断流和错误事件。本版支持语速，不发送表达指令，不提供实时边合成边播放。中断后重新请求可能再次计费。当前仅做模拟验证，未使用真实火山账户合成。
+
+接口依据：[火山引擎官方文档](https://docs.volcengine.com/docs/DoubaoVoice/unidirectional-streaming-text-to-speech-http?lang=zh)、[字节跳动官方示例](https://github.com/bytedance/agentkit-samples/blob/main/skills/byted-text-to-speech/scripts/text_to_speech.py)。
+
+本次真实验收获授权上限 2 元；按 [CosyVoice v3-flash 北京地域官方价格](https://help.aliyun.com/zh/model-studio/cosyvoice-v3-flash) 1 元/万字符估算，提交正文 1824 字符约 0.1824 元；暂停续做前重复预留但未重复发送的预算计入保守上界 0.3645 元。实际账单以服务商为准。验收文稿与音频仅保存本地，不提交仓库。
 
 ## 0.7：长文成品检查
 
@@ -36,7 +62,7 @@
 
 ### 安装
 
-退出旧版 KongVox，打开 `KongVox-0.7-Mac.dmg`，把 KongVox 拖到 Applications，再从「应用程序」打开。项目与服务配置沿用本机数据。升级后的钥匙串访问可能再次要求登录密码，由 macOS 处理。
+退出旧版 KongVox，打开 `KongVox-0.8.1-Mac.dmg`，把 KongVox 拖到 Applications，再从「应用程序」打开。项目与服务配置沿用本机数据。升级后的钥匙串访问可能再次要求登录密码，由 macOS 处理。
 
 本地安装包适用于 Apple Silicon；使用 ad-hoc 签名，尚未 Developer ID 公证。
 
@@ -143,10 +169,10 @@ bash scripts/build-app.sh
 python3 -m venv /tmp/kongvox-dmg-env
 /tmp/kongvox-dmg-env/bin/pip install ds_store==1.3.1 mac-alias==2.2.2
 DMG_PYTHON=/tmp/kongvox-dmg-env/bin/python3 bash scripts/build-dmg.sh
-open dist/KongVox-0.7/KongVox.app
+open dist/KongVox-0.8.1/KongVox.app
 ```
 
-产出 `dist/KongVox-0.7/KongVox.app` 与 `dist/KongVox-0.7-Mac.zip`，按当前 Mac 架构构建。本地交付为 Apple Silicon 版本，使用 ad-hoc 签名，尚未 Developer ID 公证。
+产出 `dist/KongVox-0.8.1/KongVox.app` 与 `dist/KongVox-0.8.1-Mac.zip`，按当前 Mac 架构构建。本地交付为 Apple Silicon 版本，使用 ad-hoc 签名，尚未 Developer ID 公证。
 
 ## 数据
 
@@ -162,9 +188,9 @@ open dist/KongVox-0.7/KongVox.app
 
 ## 验证与限制
 
-46 组本地测试通过，覆盖自然衔接、音量匹配、ZIP/SRT 共用时间轴、开头复用、用量估计、播放定位，以及既有服务、恢复和音频格式。使用模拟 HTTP，不调用真实付费服务。详见 [验证记录](VALIDATION.md)。
+52 组本地测试通过，覆盖自然衔接、音量匹配、ZIP/SRT 共用时间轴、开头复用、用量估计、播放定位，以及既有服务、恢复和音频格式。使用模拟 HTTP，不调用真实付费服务。详见 [验证记录](VALIDATION.md)。
 
-真实云端配音、账户权限、声音自然度和 MP3 编码尚需配置后验证。不包含发音词典、A/B 对比面板或章节编辑。
+CosyVoice 已完成一次真实长文流程验收；主观音质与其他服务账户权限仍需复听或配置验证。MP3 编码需要 FFmpeg。
 
 ## 接口文档
 

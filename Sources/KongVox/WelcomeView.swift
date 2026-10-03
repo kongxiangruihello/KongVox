@@ -26,10 +26,10 @@ struct WelcomeView: View {
                 step("1", "连接配音服务", "在服务设置中选择服务和模型，填入自己的 API Key。密钥保存在 Mac 钥匙串。")
                 step("2", "粘贴全文，先听开头", "确认声音和语速后生成全文。已生成且设置未变的开头会复用。")
                 step("3", "检查成品，一次导出", "拖动进度条检查内容，导出完整音频，或包含音频和字幕的组合包。")
-            }.padding(22).background(.white.opacity(0.75), in: RoundedRectangle(cornerRadius: 18))
+            }.padding(22).background(.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 18))
             Text("配音会按你的服务商账户计费；本地播放与导出不调用合成接口。升级后，macOS 可能要求重新授权钥匙串访问。").font(.caption).foregroundStyle(.secondary)
             HStack {
-                Text("KongVox 0.7 · macOS").font(.caption).foregroundStyle(.secondary)
+                Text("KongVox 0.8.1 · macOS").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("直接开始", action: start).controlSize(.large)
                 Button("配置配音服务", action: configure).buttonStyle(.borderedProminent).controlSize(.large)

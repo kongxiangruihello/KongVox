@@ -12,6 +12,13 @@ import UniformTypeIdentifiers
     @Published var projects: [Project] = [] { didSet { usageCache = nil } }
     @Published var selected: UUID? { didSet { usageCache = nil } }
     @Published var busy = false
+    @Published var presets: [VoicePreset] = []
+    @Published var queue: [QueueEntry] = []
+    @Published var queueRunning = false
+    var queueTask: Task<Void, Never>?
+    var queueStop = false
+    var queueSkip = false
+    var isWorking: Bool { busy || queueRunning }
     @Published var activeSegment: UUID?
     @Published var status = "准备好，让文字开口。"
     @Published var error: String?
@@ -57,6 +64,19 @@ import UniformTypeIdentifiers
                 catalog.builtinsRevision = 2
                 try JSONEncoder().encode(catalog).write(to: servicesFile, options: .atomic)
             }
+            if (catalog.builtinsRevision ?? 0) < 3 {
+                if !catalog.profiles.contains(where: { $0.id == ServiceProfile.volcengine.id }) { catalog.profiles.append(.volcengine) }
+                catalog.builtinsRevision = 3
+                try JSONEncoder().encode(catalog).write(to: servicesFile, options: .atomic)
+            }
+            for name in ["presets", "queue"] {
+                let extra = self.root.appendingPathComponent(name + ".json")
+                if FileManager.default.fileExists(atPath: extra.path) {
+                    if name == "presets" { presets = try JSONDecoder().decode([VoicePreset].self, from: Data(contentsOf: extra)) }
+                    else { queue = try JSONDecoder().decode([QueueEntry].self, from: Data(contentsOf: extra)) }
+                }
+            }
+            for i in queue.indices where queue[i].state == "生成中" { queue[i].state = "已暂停" }
             let file = self.root.appendingPathComponent("projects.json")
             if FileManager.default.fileExists(atPath: file.path) {
                 projects = try JSONDecoder().decode([Project].self, from: Data(contentsOf: file))
@@ -91,7 +111,7 @@ import UniformTypeIdentifiers
         edit { p in p.settings.service = service; p.settings.voice = service.voices.first ?? "" }
     }
     func saveService(_ service: ServiceProfile, key: String?, makeDefault: Bool) throws {
-        guard !busy, storageAvailable else { throw VoxError(message: "当前无法修改服务设置。") }
+        guard !isWorking, storageAvailable else { throw VoxError(message: "当前无法修改服务设置。") }
         let profile = try service.validated()
         var updated = catalog
         if let i = updated.profiles.firstIndex(where: { $0.id == profile.id }) { updated.profiles[i] = profile }
@@ -109,7 +129,7 @@ import UniformTypeIdentifiers
         // Explicitly selecting the edited service applies it to a project; existing takes remain exportable.
     }
     func deleteService(_ id: String) throws {
-        guard !busy, storageAvailable else { return }
+        guard !isWorking, storageAvailable else { return }
         guard !projects.contains(where: { $0.settings.resolvedService.id == id }) else { throw VoxError(message: "有项目正在使用此服务，请先切换这些项目的服务；也可以先停用。") }
         var updated = catalog
         updated.profiles.removeAll { $0.id == id }
@@ -126,12 +146,12 @@ import UniformTypeIdentifiers
         catch { self.error = "保存失败：\(error.localizedDescription)"; return false }
     }
     func edit(_ change: (inout Project) -> Void) {
-        guard !busy, let index = projects.firstIndex(where: { $0.id == selected }) else { return }
+        guard !isWorking, let index = projects.firstIndex(where: { $0.id == selected }) else { return }
         stop()
         change(&projects[index]); findings = []; qualitySummary = "内容已改变，请重新检查"; save()
     }
     func newProject() {
-        guard !busy else { return }
+        guard !isWorking else { return }
         stop()
         let p = makeProject(); projects.insert(p, at: 0); selected = p.id; save()
     }
@@ -169,7 +189,7 @@ import UniformTypeIdentifiers
         return FileManager.default.fileExists(atPath: recoveryFile(segment, project: p).path)
     }
     func discardRecovery(_ segment: Segment) {
-        guard !busy, let p = project else { return }
+        guard !isWorking, let p = project else { return }
         do { try DownloadReceipt.clear(recoveryFile(segment, project: p)); status = "已放弃该段下载缓存，下次生成会重新请求服务。" }
         catch { self.error = "无法清除下载缓存，请检查本地文件权限。" }
     }
@@ -202,7 +222,7 @@ import UniformTypeIdentifiers
         }
     }
     func generateOpening() {
-        guard !busy, storageAvailable, let index = projects.firstIndex(where: { $0.id == selected }) else { return }
+        guard !isWorking, storageAvailable, let index = projects.firstIndex(where: { $0.id == selected }) else { return }
         if projects[index].isLongMode { projects[index].prepareLongDocument(); guard save() else { return } }
         guard let p = project, let first = p.segments.first else { return }
         if ready(first, settings: p.settings), let take = first.current { playOpening(audioURL(take)) }
@@ -216,8 +236,8 @@ import UniformTypeIdentifiers
             play(clip); status = "正在试听开头（最多 20 秒），全文生成会复用已生成的开头。"
         } catch { self.error = error.localizedDescription }
     }
-    func generate(only: UUID? = nil, opening: Bool = false, scope: Set<UUID>? = nil, force: Bool = false, audition: Bool = false) {
-        guard !busy, storageAvailable else { return }
+    func generate(only: UUID? = nil, opening: Bool = false, scope: Set<UUID>? = nil, force: Bool = false, audition: Bool = false, fromQueue: Bool = false) {
+        guard !busy, (!queueRunning || fromQueue), storageAvailable else { return }
         if only == nil, project?.isLongMode == true, let index = projects.firstIndex(where: { $0.id == selected }) {
             projects[index].prepareLongDocument()
             guard save() else { return }
@@ -287,11 +307,11 @@ import UniformTypeIdentifiers
     }
     func pauseAfterSegment() { if activeSegment != nil { pauseRequested = true; status = "当前片段完成并保存后暂停…" } }
     func prepareReview() {
-        guard !busy else { return }
+        guard !isWorking else { return }
         if project?.isLongMode == true { edit { $0.prepareLongDocument() } }
     }
     func saveDictionary(_ rules: [PronunciationRule], global: Bool) {
-        guard !busy, storageAvailable else { return }
+        guard !isWorking, storageAvailable else { return }
         guard rules.allSatisfy({ !$0.word.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !$0.reading.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }), Set(rules.map(\.word)).count == rules.count else {
             error = "原词与读法不能为空，同一词典中原词不能重复。"; return
         }
@@ -306,7 +326,7 @@ import UniformTypeIdentifiers
         } else { edit { $0.settings.pronunciationRules = rules } }
     }
     func inspectAudio() {
-        guard !busy, let p = project else { return }
+        guard !isWorking, let p = project else { return }
         guard !(p.isLongMode && p.needsLongPreparation) else { error = "请先更新处理片段，再检查当前文稿。"; return }
         busy = true; findings = []; qualitySummary = "正在检查…"
         let folder = root
@@ -319,11 +339,11 @@ import UniformTypeIdentifiers
         }
     }
     func playFinding(_ finding: AudioFinding) {
-        guard !busy, let take = project?.segments.first(where: { $0.id == finding.segmentID })?.current else { return }
+        guard !isWorking, let take = project?.segments.first(where: { $0.id == finding.segmentID })?.current else { return }
         play(audioURL(take)); seek(max(0, finding.seconds - 0.3))
     }
     func chapterAudio(_ chapter: VoiceChapter, export: Bool) {
-        guard !busy, let p = project else { return }
+        guard !isWorking, let p = project else { return }
         guard !(p.isLongMode && p.needsLongPreparation) else { error = "请先更新处理片段。"; return }
         let indices = p.segments.indices.filter { chapter.segmentIDs.contains(p.segments[$0].id) }
         guard !indices.isEmpty, indices.allSatisfy({ ready(p.segments[$0], settings: p.settings) }) else { error = "本章尚有未更新的音频，请先生成本章。"; return }
@@ -351,7 +371,7 @@ import UniformTypeIdentifiers
         }
     }
     func adoptTake(segmentID: UUID, takeID: UUID) {
-        guard !busy, let p = project, let segment = p.segments.first(where: { $0.id == segmentID }),
+        guard !isWorking, let p = project, let segment = p.segments.first(where: { $0.id == segmentID }),
               let take = segment.takes.first(where: { $0.id == takeID }),
               take.fingerprint == segment.fingerprint(p.settings), FileManager.default.fileExists(atPath: audioURL(take).path) else {
             error = "此版本与当前文稿或声音设置不匹配，不能作为当前成品采用。"; return
@@ -401,7 +421,7 @@ import UniformTypeIdentifiers
         return p.segments.compactMap { $0.current.map(audioURL) }
     }
     func playAll(from segmentID: UUID? = nil) {
-        guard !busy else { return }
+        guard !isWorking else { return }
         do {
             let urls = try currentURLs(); let snapshot = project!; let gaps = snapshot.gaps; let normalize = snapshot.levelsEnabled
             if playbackProject == snapshot.id, let segmentID, let cue = playbackCues.first(where: { $0.id == segmentID }), player != nil {
@@ -425,7 +445,7 @@ import UniformTypeIdentifiers
         ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"].first { FileManager.default.isExecutableFile(atPath: $0) }.map { URL(fileURLWithPath: $0) }
     }
     func exportSubtitles() {
-        guard !busy, let p = project else { return }
+        guard !isWorking, let p = project else { return }
         do {
             let urls = try currentURLs()
             let panel = NSSavePanel()
@@ -448,7 +468,7 @@ import UniformTypeIdentifiers
         } catch { self.error = error.localizedDescription }
     }
     func exportBundle() {
-        guard !busy, let p = project else { return }
+        guard !isWorking, let p = project else { return }
         do {
             let urls = try currentURLs()
             let panel = NSSavePanel(); panel.allowedContentTypes = [.zip]
@@ -466,7 +486,7 @@ import UniformTypeIdentifiers
         } catch { self.error = error.localizedDescription }
     }
     func export(format: String) {
-        guard !busy else { return }
+        guard !isWorking else { return }
         do {
             let urls = try currentURLs()
             let panel = NSSavePanel()

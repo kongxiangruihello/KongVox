@@ -30,7 +30,7 @@ struct GenerationReview: View {
                 Button("返回编辑") { dismiss() }
                 Spacer()
                 Button("开始生成待更新内容") { dismiss(); studio.generate(scope: scope, force: state.force) }.buttonStyle(.borderedProminent)
-                    .disabled(studio.busy || studio.project?.segments.isEmpty != false)
+                    .disabled(studio.isWorking || studio.project?.segments.isEmpty != false)
             }
         }.padding(24).frame(width: 720, height: 520)
     }
@@ -64,7 +64,7 @@ struct LongFormWorkbench: View {
     var chapterList: some View {
         VStack(alignment: .leading) {
             Text("按独立行的「第一章」、数字编号或 Markdown 标题识别章节；标题也会朗读。没有标题时作为一章。全文仍可统一导出。").font(.caption).foregroundStyle(.secondary)
-            Button("按当前文稿更新处理片段") { studio.prepareReview() }.disabled(studio.busy)
+            Button("按当前文稿更新处理片段") { studio.prepareReview() }.disabled(studio.isWorking)
             List {
                 if let p = studio.project {
                     ForEach(p.chapters) { chapter in
@@ -76,7 +76,7 @@ struct LongFormWorkbench: View {
                                 Button("生成待更新") { state.chapterScope = Set(chapter.segmentIDs); state.showReview = true }
                                 Button("试听") { studio.chapterAudio(chapter, export: false) }
                                 Button("导出本章 WAV") { studio.chapterAudio(chapter, export: true) }
-                            }.disabled(studio.busy || (p.isLongMode && p.needsLongPreparation))
+                            }.disabled(studio.isWorking || (p.isLongMode && p.needsLongPreparation))
                         }.padding(.vertical, 6)
                     }
                 }
@@ -87,13 +87,13 @@ struct LongFormWorkbench: View {
     var qualityList: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("检查原始片段的长静音、音量差异、异常短时长和缺失文件，不上传音频。提示不能代替人工确认漏读。").font(.caption).foregroundStyle(.secondary)
-            HStack { Button("检查当前项目") { studio.inspectAudio() }.disabled(studio.busy); Text(studio.qualitySummary).font(.caption) }
+            HStack { Button("检查当前项目") { studio.inspectAudio() }.disabled(studio.isWorking); Text(studio.qualitySummary).font(.caption) }
             List(studio.findings) { finding in
                 HStack {
                     VStack(alignment: .leading) { Text("片段 \(finding.index + 1) · \(Studio.timeLabel(finding.seconds))").font(.headline); Text(finding.message) }
                     Spacer()
-                    Button("修复 / 对比") { state.repairID = finding.segmentID; state.showRepair = true }.disabled(studio.busy)
-                    Button("定位试听") { studio.playFinding(finding) }.disabled(studio.busy || studio.project?.segments.first(where: { $0.id == finding.segmentID })?.current == nil)
+                    Button("修复 / 对比") { state.repairID = finding.segmentID; state.showRepair = true }.disabled(studio.isWorking)
+                    Button("定位试听") { studio.playFinding(finding) }.disabled(studio.isWorking || studio.project?.segments.first(where: { $0.id == finding.segmentID })?.current == nil)
                 }.padding(.vertical, 5)
             }
         }
@@ -113,13 +113,13 @@ struct LongFormWorkbench: View {
                     if let message = p.taskMessage { Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(4) }
                     HStack {
                         if p.id == studio.activeProject {
-                            Button(studio.pauseRequested ? "等待当前片段完成…" : "本段完成后暂停") { studio.pauseAfterSegment() }.disabled(studio.pauseRequested)
-                            Button("立即取消") { studio.cancel() }
+                            Button(studio.pauseRequested ? "等待当前片段完成…" : "本段完成后暂停") { if studio.queueRunning { studio.pauseQueue() } else { studio.pauseAfterSegment() } }.disabled(studio.pauseRequested)
+                            Button("立即取消") { if studio.queueRunning { studio.pauseQueue() }; studio.cancel() }
                         } else {
                             Button("打开并检查生成范围") {
                                 studio.stop(); studio.selected = p.id; studio.findings = []; studio.qualitySummary = "尚未检查"
                                 studio.prepareReview(); state.chapterScope = nil; state.showReview = true
-                            }.disabled(studio.busy)
+                            }.disabled(studio.isWorking)
                         }
                     }
                 }.padding(.vertical, 8)
@@ -159,7 +159,7 @@ struct DictionaryEditor: View {
                 }
                 Text(state.saved).font(.caption).foregroundStyle(.secondary)
             }
-        }.disabled(studio.busy).onAppear { load() }
+        }.disabled(studio.isWorking).onAppear { load() }
     }
     func load() { state.rules = state.global ? studio.globalDictionary : studio.project?.settings.pronunciationRules ?? []; state.saved = "" }
 }
