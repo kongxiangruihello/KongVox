@@ -81,26 +81,55 @@ struct FinishedReview: View {
         .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil } } message: { Text(studio.error ?? "") }
     }
 }
-final class RepairState: ObservableObject { @Published var pronunciation = "" }
+final class RepairState: ObservableObject {
+    @Published var pronunciation = ""
+    @Published var customSpeed = false
+    @Published var speed = 1.0
+    @Published var customPause = false
+    @Published var pause = 0.35
+    @Published var suggestion = ""
+}
 struct SegmentRepair: View {
     @EnvironmentObject var studio: Studio
     @Environment(\.dismiss) private var dismiss
     @StateObject private var state = RepairState()
     let segmentID: UUID
     var segment: Segment? { studio.project?.segments.first { $0.id == segmentID } }
-    var dirty: Bool { state.pronunciation != segment?.pronunciation }
+    var dirty: Bool {
+        state.pronunciation != segment?.pronunciation ||
+        (state.customSpeed ? state.speed : nil) != segment?.speedOverride ||
+        (state.customPause ? state.pause : nil) != segment?.pauseOverride
+    }
+    func savePrecision() { studio.savePrecision(segmentID, pronunciation: state.pronunciation, speed: state.customSpeed ? state.speed : nil, pause: state.customPause ? state.pause : nil) }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack { Text("修复与版本对比").font(.title2.bold()); Spacer(); Button("完成") { dismiss() }.disabled(studio.isWorking) }
+            HStack { Text("读音、停顿与版本对比").font(.title2.bold()); Spacer(); Button("完成") { dismiss() }.disabled(studio.isWorking) }
             if let segment, let p = studio.project {
                 Text("原文 / 字幕").font(.headline)
                 ScrollView { Text(segment.text).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }.frame(maxHeight: 100)
                 Text("完整替代读法（留空恢复按原文朗读）").font(.headline)
                 TextEditor(text: $state.pronunciation).frame(height: 90).border(.quaternary).disabled(studio.isWorking)
                 HStack {
-                    Button("保存读法") { studio.updatePronunciation(segmentID, text: state.pronunciation) }.disabled(studio.isWorking || !dirty)
+                    Toggle("单独语速", isOn: $state.customSpeed)
+                    Slider(value: $state.speed, in: 0.7...1.3, step: 0.05).frame(width: 130).disabled(!state.customSpeed)
+                    Text(String(format: "%.2f×", state.speed)).monospacedDigit()
+                    Toggle("句后停顿", isOn: $state.customPause)
+                    Slider(value: $state.pause, in: 0...3, step: 0.05).frame(width: 130).disabled(!state.customPause)
+                    Text(String(format: "%.2f 秒", state.pause)).monospacedDigit()
+                }.disabled(studio.isWorking)
+                Text("语速更改需要重新生成；停顿只作用于合并音频。当前服务是否支持语速请查看服务说明。最后一句后的停顿不导出。").font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("预览数字 / 日期 / 缩写读法") { state.suggestion = ReadingPreview.suggest(state.pronunciation.isEmpty ? segment.text : state.pronunciation) }
+                    if !state.suggestion.isEmpty { Button("填入替代读法") { state.pronunciation = state.suggestion; state.suggestion = "" } }
+                }.disabled(studio.isWorking)
+                if !state.suggestion.isEmpty {
+                    Text(state.suggestion).font(.caption).textSelection(.enabled).lineLimit(3)
+                    Text("这是规则建议；年份、号码和多音字需人工核对，可在上方编辑。不会自动覆盖原稿。").font(.caption2).foregroundStyle(.secondary)
+                }
+                HStack {
+                    Button("保存精修") { savePrecision() }.disabled(studio.isWorking || !dirty)
                     Button("生成新版本并试听") {
-                        studio.updatePronunciation(segmentID, text: state.pronunciation)
+                        savePrecision()
                         studio.generate(only: segmentID, audition: true)
                     }.disabled(studio.isWorking || (p.isLongMode && p.needsLongPreparation))
                     if studio.isWorking && studio.activeSegment == segmentID { Button("取消") { studio.cancel() } }
@@ -128,8 +157,12 @@ struct SegmentRepair: View {
                 if studio.player != nil { Button(studio.playing ? "暂停试听" : "继续试听") { studio.togglePause() }; Button("停止试听") { studio.stop() } }
                 Text(studio.status).font(.caption).foregroundStyle(.secondary)
             }.disabled(studio.isWorking)
-        }.padding(24).frame(width: 780, height: 620)
-        .onAppear { state.pronunciation = segment?.pronunciation ?? "" }
+        }.padding(24).frame(width: 820, height: 770)
+        .onAppear {
+            state.pronunciation = segment?.pronunciation ?? ""
+            state.customSpeed = segment?.speedOverride != nil; state.speed = segment?.speedOverride ?? studio.project?.settings.speed ?? 1
+            state.customPause = segment?.pauseOverride != nil; state.pause = segment?.pauseOverride ?? studio.project?.settings.pause ?? 0.35
+        }
         .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil } } message: { Text(studio.error ?? "") }
     }
 }

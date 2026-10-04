@@ -64,13 +64,13 @@ enum AudioAssembly {
 }
 
 enum ExportBundle {
-    static func write(urls: [URL], texts: [String], gaps: [Double], normalize: Bool, destination: URL) throws {
+    static func write(urls: [URL], texts: [String], gaps: [Double], normalize: Bool, destination: URL, subtitleStyle: SubtitleStyle = .paragraph) throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let staging = destination.deletingLastPathComponent().appendingPathComponent(".\(UUID()).zip")
         defer { try? FileManager.default.removeItem(at: folder); try? FileManager.default.removeItem(at: staging) }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let frames = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: normalize, to: folder.appendingPathComponent("配音.wav"))
-        try Subtitles.render(texts: texts, frames: frames, gaps: gaps).write(to: folder.appendingPathComponent("配音.srt"), atomically: true, encoding: .utf8)
+        try Subtitles.render(texts: texts, frames: frames, gaps: gaps, style: subtitleStyle).write(to: folder.appendingPathComponent("配音.srt"), atomically: true, encoding: .utf8)
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         process.arguments = ["-c", "-k", "--norsrc", folder.path, staging.path]
         process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice

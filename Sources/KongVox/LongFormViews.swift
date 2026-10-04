@@ -9,8 +9,13 @@ struct GenerationReview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("确认本次生成范围").font(.title2.bold())
-            Text("仅处理待更新内容；已有音频会保留。修改句子仍可能需要重做其所在的整段。生成按所选服务计费。").foregroundStyle(.secondary)
+            Text("仅处理待更新内容；已有音频会保留。按句精修可缩小重做范围；未开启时可能需要重做整段。生成按所选服务计费。").foregroundStyle(.secondary)
             if let p = studio.project {
+                let affected = p.segments.filter { (scope == nil || scope!.contains($0.id)) && (state.force || !studio.ready($0, settings: p.settings)) }
+                Text("本次待处理 \(affected.count) 个片段 · \(affected.reduce(0) { $0 + p.settings.reading($1.spokenText).count }) 字（含可恢复下载）").font(.headline)
+                let issues = ServicePreflight.inspect(p, catalog: studio.catalog)
+                ForEach(issues.prefix(3)) { issue in Text(issue.message).font(.caption).foregroundStyle(issue.blocking ? .red : .orange) }
+                HStack { Button("检查配置（不计费）") { studio.checkConfiguration() }; Text(studio.preflightMessage).font(.caption).lineLimit(3) }
                 List {
                     ForEach(Array(p.segments.enumerated()).filter { scope == nil || scope!.contains($0.element.id) }, id: \.element.id) { index, segment in
                         HStack(alignment: .top) {
@@ -30,7 +35,7 @@ struct GenerationReview: View {
                 Button("返回编辑") { dismiss() }
                 Spacer()
                 Button("开始生成待更新内容") { dismiss(); studio.generate(scope: scope, force: state.force) }.buttonStyle(.borderedProminent)
-                    .disabled(studio.isWorking || studio.project?.segments.isEmpty != false)
+                    .disabled(studio.isWorking || studio.project?.segments.isEmpty != false || studio.project.map { ServicePreflight.inspect($0, catalog: studio.catalog).contains(where: \.blocking) } == true)
             }
         }.padding(24).frame(width: 720, height: 520)
     }

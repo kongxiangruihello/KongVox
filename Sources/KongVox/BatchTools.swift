@@ -125,7 +125,7 @@ enum BatchExport {
         let staging = destination.deletingLastPathComponent().appendingPathComponent(".kongvox-export-\(UUID())")
         try fm.createDirectory(at: staging, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: staging) }
-        var manifest = ["KongVox 配音交付清单", "格式：WAV · 24 kHz · 单声道 · 16-bit PCM；SRT 为段落字幕", ""]
+        var manifest = ["KongVox 配音交付清单", "格式：WAV · 24 kHz · 单声道 · 16-bit PCM；SRT 按各项目字幕设置导出", ""]
         for (projectIndex, p) in projects.enumerated() {
             guard !p.segments.isEmpty, !p.needsLongPreparation || !p.isLongMode,
                   p.segments.allSatisfy({ $0.ready(p.settings) && $0.current != nil }) else { throw VoxError(message: "「\(p.title)」尚有未生成或待更新的音频。") }
@@ -136,7 +136,7 @@ enum BatchExport {
                 let urls = group.1.map { root.appendingPathComponent("Audio").appendingPathComponent(p.segments[$0].current!.file) }
                 let gaps = group.1.map { p.gaps[$0] }
                 let frames = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: p.levelsEnabled, to: staging.appendingPathComponent(name + ".wav"))
-                let subtitle = try Subtitles.render(texts: group.1.map { p.segments[$0].text }, frames: frames, gaps: gaps)
+                let subtitle = try Subtitles.render(texts: group.1.map { p.segments[$0].text }, frames: frames, gaps: gaps, style: p.resolvedSubtitleStyle)
                 try subtitle.write(to: staging.appendingPathComponent(name + ".srt"), atomically: true, encoding: .utf8)
                 let duration = Double(frames.reduce(0,+)) / 24000 + gaps.dropLast().reduce(0,+)
                 manifest.append("\(name)\n时长：\(String(format: "%.2f", duration)) 秒\n文件：\(name).wav / \(name).srt\n")

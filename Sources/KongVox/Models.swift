@@ -31,11 +31,19 @@ struct Segment: Codable, Identifiable {
     var text: String
     var pronunciation = ""
     var paragraphEnd: Bool?
+    var speedOverride: Double?
+    var pauseOverride: Double?
     var takes: [Take] = []
     var selectedTake: UUID?
     var spokenText: String { pronunciation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? text : pronunciation }
     var current: Take? { takes.first { $0.id == selectedTake } }
-    func fingerprint(_ settings: VoiceSettings) -> String {
+    func effectiveSettings(_ base: VoiceSettings) -> VoiceSettings {
+        var value = base
+        if let speedOverride { value.speed = speedOverride }
+        return value
+    }
+    func fingerprint(_ base: VoiceSettings) -> String {
+        let settings = effectiveSettings(base)
         // Pause is applied at export, so it must not invalidate generated speech.
         var fields = [settings.reading(spokenText), settings.voice, String(settings.speed), settings.instructions]
         if !settings.resolvedService.isLegacyOpenAI { fields.append(settings.resolvedService.signature) }
@@ -59,6 +67,11 @@ struct Project: Codable, Identifiable {
     var taskState: String?
     var taskMessage: String?
     var normalizeVolume: Bool?
+    var sentenceEditing: Bool?
+    var preparedSentenceEditing: Bool?
+    var subtitleStyle: SubtitleStyle?
+    var sentenceMode: Bool { sentenceEditing ?? false }
+    var resolvedSubtitleStyle: SubtitleStyle { subtitleStyle ?? .paragraph }
     var levelsEnabled: Bool { normalizeVolume ?? true }
     var paragraphEnds: [Bool] {
         if segments.allSatisfy({ $0.paragraphEnd != nil }) { return segments.map { $0.paragraphEnd! } }
@@ -71,11 +84,18 @@ struct Project: Codable, Identifiable {
         if texts == segments.map(\.text) { return ends }
         return segments.map { $0.paragraphEnd ?? true }
     }
-    var gaps: [Double] { paragraphEnds.map { $0 ? max(0, min(3, settings.pause)) : 0 } }
+    var gaps: [Double] {
+        let ends = paragraphEnds
+        return segments.enumerated().map { i, segment in
+            let value = segment.pauseOverride ?? (ends[i] ? settings.pause : 0)
+            return value.isFinite ? max(0, min(3, value)) : 0
+        }
+    }
     var isLongMode: Bool { longMode ?? true }
     var fullText: String { longText ?? (segments.map(\.text) + (draft.isEmpty ? [] : [draft])).joined(separator: "\n\n") }
     var chunkLimit: Int { settings.resolvedService.kind == .qwenTTS ? 500 : 700 }
     var needsLongPreparation: Bool {
+        sentenceMode != (preparedSentenceEditing ?? false) ||
         fullText != (preparedLongText ?? segments.map(\.text).joined(separator: "\n\n")) ||
         !draft.isEmpty || segments.contains { $0.spokenText.count > chunkLimit }
     }
@@ -84,7 +104,8 @@ struct Project: Codable, Identifiable {
         if !needsLongPreparation { longText = text; preparedLongText = text; return }
         var available = segments + (archivedSegments ?? [])
         // Reuse unchanged segments, including their history, pronunciation overrides and recovery IDs.
-        segments = LongChunker.reconcile(text, limit: chunkLimit, existing: available).map { chunk in
+        let chunks = sentenceMode ? SentenceText.chunks(text, limit: chunkLimit) : LongChunker.reconcile(text, limit: chunkLimit, existing: available)
+        segments = chunks.map { chunk in
             let piece = chunk.text
             if let index = available.firstIndex(where: { $0.text == piece && $0.spokenText.count <= chunkLimit }) {
                 var segment = available.remove(at: index); segment.paragraphEnd = chunk.paragraphEnd; return segment
@@ -92,7 +113,7 @@ struct Project: Codable, Identifiable {
             var segment = Segment(text: piece); segment.paragraphEnd = chunk.paragraphEnd; return segment
         }
         archivedSegments = available
-        longText = text; preparedLongText = text; draft = ""
+        longText = text; preparedLongText = text; preparedSentenceEditing = sentenceMode; draft = ""
     }
 }
 enum LongChunker {

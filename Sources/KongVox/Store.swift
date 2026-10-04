@@ -6,12 +6,15 @@ import UniformTypeIdentifiers
     @Published var globalDictionary: [PronunciationRule] = []
     @Published var findings: [AudioFinding] = []
     @Published var qualitySummary = "尚未检查"
+    @Published var preflightMessage = "尚未检查密钥；配置检查不调用付费接口。"
     @Published var pauseRequested = false
     @Published var activeProject: UUID?
     @Published var catalog = ServiceCatalog()
     @Published var projects: [Project] = [] { didSet { usageCache = nil } }
     @Published var selected: UUID? { didSet { usageCache = nil } }
     @Published var busy = false
+    @Published var comparingVoices = false
+    @Published var voiceFavorites: [VoiceFavorite] = []
     @Published var presets: [VoicePreset] = []
     @Published var queue: [QueueEntry] = []
     @Published var queueRunning = false
@@ -69,6 +72,8 @@ import UniformTypeIdentifiers
                 catalog.builtinsRevision = 3
                 try JSONEncoder().encode(catalog).write(to: servicesFile, options: .atomic)
             }
+            let voicesFile = self.root.appendingPathComponent("voices.json")
+            if FileManager.default.fileExists(atPath: voicesFile.path) { voiceFavorites = try JSONDecoder().decode([VoiceFavorite].self, from: Data(contentsOf: voicesFile)) }
             for name in ["presets", "queue"] {
                 let extra = self.root.appendingPathComponent(name + ".json")
                 if FileManager.default.fileExists(atPath: extra.path) {
@@ -125,6 +130,7 @@ import UniformTypeIdentifiers
         if let key { try KeyStore.save(key.trimmingCharacters(in: .whitespacesAndNewlines), account: profile.keyAccount) }
         try JSONEncoder().encode(updated).write(to: root.appendingPathComponent("services.json"), options: .atomic)
         catalog = updated
+        preflightMessage = "服务已改变，可重新检查。"
         // Projects keep the exact service snapshot used for their voice settings.
         // Explicitly selecting the edited service applies it to a project; existing takes remain exportable.
     }
@@ -137,6 +143,7 @@ import UniformTypeIdentifiers
         if updated.defaultID == id { updated.defaultID = updated.profiles.first { $0.enabled }!.id }
         try JSONEncoder().encode(updated).write(to: root.appendingPathComponent("services.json"), options: .atomic)
         catalog = updated
+        preflightMessage = "服务已改变，可重新检查。"
         // Historical take snapshots may still reference this account. Do not silently erase their key.
     }
     var project: Project? { projects.first { $0.id == selected } }
@@ -148,7 +155,7 @@ import UniformTypeIdentifiers
     func edit(_ change: (inout Project) -> Void) {
         guard !isWorking, let index = projects.firstIndex(where: { $0.id == selected }) else { return }
         stop()
-        change(&projects[index]); findings = []; qualitySummary = "内容已改变，请重新检查"; save()
+        change(&projects[index]); preflightMessage = "配置或文稿已改变，可重新检查。"; findings = []; qualitySummary = "内容已改变，请重新检查"; save()
     }
     func newProject() {
         guard !isWorking else { return }
@@ -248,6 +255,8 @@ import UniformTypeIdentifiers
             error = "发音替换后的片段超过服务长度限制，请缩短替代读法或在段落精调中拆分。"; return
         }
         guard !pending.isEmpty else { status = "全文已就绪，可以试听或导出完整音频。"; return }
+        let issues = ServicePreflight.inspect(snapshot, catalog: catalog).filter(\.blocking)
+        guard issues.isEmpty else { error = issues.map(\.message).joined(separator: "\n"); return }
         let service = snapshot.settings.resolvedService
         guard let saved = catalog.profiles.first(where: { $0.id == service.id }), saved.enabled else { error = "该服务已停用，请在声音工作台切换或在服务设置中启用。"; return }
         guard saved == service else { error = "服务配置已更新，请在声音工作台点击「应用最新服务配置」，确认后再生成。"; return }
@@ -259,6 +268,18 @@ import UniformTypeIdentifiers
             defer { busy = false; activeSegment = nil; activeProject = nil; pauseRequested = false; task = nil }
             var auditionTake: Take?
             var generationKey: String?
+            do {
+                let fresh = pending.filter { !FileManager.default.fileExists(atPath: recoveryFile($0, project: snapshot).path) }
+                if !fresh.isEmpty {
+                    generationKey = try keyProvider(service)
+                    for segment in fresh {
+                        _ = try client.request(text: snapshot.settings.reading(segment.spokenText), settings: segment.effectiveSettings(snapshot.settings), key: generationKey ?? "")
+                    }
+                }
+            } catch {
+                self.error = error.localizedDescription; diagnostic = ServiceFailure.report(error)
+                setTaskState(snapshot.id, "配置待检查", diagnostic); return
+            }
             for (offset, segment) in pending.enumerated() {
                 do {
                     try Task.checkCancellation()
@@ -270,9 +291,9 @@ import UniformTypeIdentifiers
                         : "\(resume ? "正在恢复下载" : "正在生成") \(offset + 1) / \(pending.count) 段…"
                     if !resume && generationKey == nil { generationKey = try keyProvider(service) }
                     let key = resume ? "" : generationKey ?? ""
-                    let pcm = try await client.generate(text: snapshot.settings.reading(segment.spokenText), settings: snapshot.settings, key: key, recoveryFile: recovery)
+                    let pcm = try await client.generate(text: snapshot.settings.reading(segment.spokenText), settings: segment.effectiveSettings(snapshot.settings), key: key, recoveryFile: recovery)
                     try Task.checkCancellation()
-                    let take = Take(file: "\(UUID().uuidString).wav", fingerprint: segment.fingerprint(snapshot.settings), service: service, settings: snapshot.settings, spokenText: snapshot.settings.reading(segment.spokenText))
+                    let take = Take(file: "\(UUID().uuidString).wav", fingerprint: segment.fingerprint(snapshot.settings), service: service, settings: segment.effectiveSettings(snapshot.settings), spokenText: snapshot.settings.reading(segment.spokenText))
                     try AudioFiles.writePCM(pcm, to: audioURL(take))
                     guard let pi = projects.firstIndex(where: { $0.id == snapshot.id }), let si = projects[pi].segments.firstIndex(where: { $0.id == segment.id }) else { return }
                     projects[pi].segments[si].takes.insert(take, at: 0)
@@ -458,7 +479,7 @@ import UniformTypeIdentifiers
                 do {
                     try await Task.detached {
                         let frames = try AudioAssembly.render(urls: urls, gaps: p.gaps, normalize: p.levelsEnabled)
-                        let content = try Subtitles.render(texts: p.segments.map(\.text), frames: frames, gaps: p.gaps)
+                        let content = try Subtitles.render(texts: p.segments.map(\.text), frames: frames, gaps: p.gaps, style: p.resolvedSubtitleStyle)
                         try content.write(to: destination, atomically: true, encoding: .utf8)
                     }.value
                     status = "已导出段落字幕：\(destination.lastPathComponent)"
@@ -478,7 +499,7 @@ import UniformTypeIdentifiers
             task = Task {
                 defer { busy = false; task = nil }
                 do {
-                    try await Task.detached { try ExportBundle.write(urls: urls, texts: p.segments.map(\.text), gaps: p.gaps, normalize: p.levelsEnabled, destination: destination) }.value
+                    try await Task.detached { try ExportBundle.write(urls: urls, texts: p.segments.map(\.text), gaps: p.gaps, normalize: p.levelsEnabled, destination: destination, subtitleStyle: p.resolvedSubtitleStyle) }.value
                     status = "已导出同一版本的配音.wav 与配音.srt。"
                     NSWorkspace.shared.activateFileViewerSelecting([destination])
                 } catch { self.error = error.localizedDescription; status = "组合包导出失败，原文件未修改。" }

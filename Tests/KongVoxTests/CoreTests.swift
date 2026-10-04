@@ -107,6 +107,16 @@ final class MockProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         Self.captured = request
+        if request.httpBody == nil, let stream = request.httpBodyStream {
+            stream.open(); defer { stream.close() }
+            var body = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                if count <= 0 { break }
+                body.append(contentsOf: buffer.prefix(count))
+            }
+            Self.captured?.httpBody = body
+        }
         Self.count += 1
         let responseStatus = Self.failOnRequest == Self.count ? 500 : Self.status
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: responseStatus, httpVersion: nil, headerFields: ["Content-Type":"audio/pcm"])!, cacheStoragePolicy: .notAllowed)
@@ -235,7 +245,14 @@ final class SpeechTests: XCTestCase {
         try await v08.testMultiProjectQueueFailureResumeAndLocks()
         try await v08.testQueuePauseAndStopOnFailure()
         try v08.testBatchExportAndRollback()
-        print("PASS: 52 test groups; Volcengine SSE, document import, presets, multi-project queue, batch delivery; timeline/highlighting, audition/adoption, backup isolation/corruption, 10k/30k text stress; anchored edits, chapters, dictionary precedence/persistence/invalidation, graceful pause/restart, chapter scope/redo and quality findings; natural joins, level matching, ZIP/SRT shared timeline, opening reuse, usage estimates and seek; long document preservation/reuse/resume/full export; observed CosyVoice header and Qwen models/migration; persistent download recovery, safe diagnostics, SRT timing; WAV streaming headers and normalization; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
+        let v09 = Version09Tests()
+        try v09.testSentenceEditingReuseAndLegacy()
+        try await v09.testPrecisionSpeedPauseAndRequest()
+        try v09.testSentenceSubtitlesAndVerticalTiming()
+        try await v09.testPreflightWithoutPaidRequests()
+        try await v09.testVoiceFavoritesCacheAndIsolation()
+        try v09.testReadingAndCompletionReport()
+        print("PASS: 58 test groups; sentence reuse, per-sentence speed/pause, subtitle splitting, preflight, voice cache and completeness; Volcengine SSE, document import, presets, multi-project queue, batch delivery; timeline/highlighting, audition/adoption, backup isolation/corruption, 10k/30k text stress; anchored edits, chapters, dictionary precedence/persistence/invalidation, graceful pause/restart, chapter scope/redo and quality findings; natural joins, level matching, ZIP/SRT shared timeline, opening reuse, usage estimates and seek; long document preservation/reuse/resume/full export; observed CosyVoice header and Qwen models/migration; persistent download recovery, safe diagnostics, SRT timing; WAV streaming headers and normalization; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
     }
 }
 #endif

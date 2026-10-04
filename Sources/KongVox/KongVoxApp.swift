@@ -11,6 +11,7 @@ import SwiftUI
     }
 }
 final class ViewState: ObservableObject {
+    @Published var showPrecision = false
     @Published var showBatch = false
     @Published var showFinishedReview = false
     @Published var showTools = false
@@ -44,10 +45,11 @@ struct StudioView: View {
                     Button("备份当前项目…") { studio.chooseBackup() }
                     Button("从备份恢复为新项目…") { studio.chooseRestore() }
                 }.disabled(studio.isWorking)
+                Button("长文精修 / 音色收藏") { state.showPrecision = true }
                 Button("文稿导入 / 批量工作台") { state.showBatch = true }
                 Button("长文工作台 / 任务") { state.showTools = true }
                 Button("使用指南") { state.showWelcome = true }.font(.caption)
-                Text("KongVox 0.8.1 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
+                Text("KongVox 0.9 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
             }.padding(18).navigationSplitViewColumnWidth(230)
         } detail: {
             VStack(spacing: 0) {
@@ -118,6 +120,7 @@ struct StudioView: View {
         }) {
             WelcomeView(configure: { state.configureAfterWelcome = true; finishWelcome() }, start: { finishWelcome() })
         }
+        .sheet(isPresented: $state.showPrecision) { PrecisionWorkbench().environmentObject(studio) }
         .sheet(isPresented: $state.showBatch) { BatchWorkbench().environmentObject(studio) }
         .sheet(isPresented: $state.showFinishedReview) { FinishedReview().environmentObject(studio) }
         .sheet(isPresented: $state.showTools) { LongFormWorkbench().environmentObject(studio) }
@@ -203,7 +206,7 @@ struct StudioView: View {
                 Menu(p.isLongMode ? "导出完整音频" : "导出音频") {
                     Button("音频 + 字幕组合包 · ZIP") { studio.exportBundle() }
                     Divider()
-                    Button("SRT · 段落字幕") { studio.exportSubtitles() }
+                    Button("SRT · 按字幕设置") { studio.exportSubtitles() }
                     Divider()
                     Button("WAV · 无损剪辑") { studio.export(format: "wav") }
                     Button("M4A · 小体积") { studio.export(format: "m4a") }
@@ -215,7 +218,7 @@ struct StudioView: View {
         }.padding(18)
     }
 }
-@MainActor final class SegmentControls: ObservableObject { @Published var discardCache = false }
+@MainActor final class SegmentControls: ObservableObject { @Published var discardCache = false; @Published var showRepair = false }
 struct SegmentCard: View {
     @StateObject private var controls = SegmentControls()
     @EnvironmentObject var studio: Studio
@@ -242,6 +245,7 @@ struct SegmentCard: View {
             }
             HStack {
                 if studio.hasRecovery(segment) { Button("放弃下载缓存") { controls.discardCache = true } }
+                Button("读音 / 停顿精调") { controls.showRepair = true }
                 Button(studio.hasRecovery(segment) ? "继续下载" : segment.current == nil ? "生成并试听" : "重新生成") { studio.generate(only: segment.id) }
                 if let take = segment.current {
                     Button("试听此版本") { studio.play(studio.audioURL(take)) }
@@ -255,7 +259,8 @@ struct SegmentCard: View {
                 }
                 Spacer()
             }.controlSize(.small)
-        }.confirmationDialog("放弃已生成的下载结果？", isPresented: $controls.discardCache) {
+        }.sheet(isPresented: $controls.showRepair) { SegmentRepair(segmentID: segment.id).environmentObject(studio) }
+        .confirmationDialog("放弃已生成的下载结果？", isPresented: $controls.discardCache) {
             Button("放弃缓存", role: .destructive) { studio.discardRecovery(segment) }
         } message: { Text("之后点击生成将重新请求服务，可能再次计费。") }
         .padding(18).background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 14)).overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
