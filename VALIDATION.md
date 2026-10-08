@@ -1,7 +1,9 @@
 # KongVox 0.11.3 验证记录
 
 - 2026-10-08：按代码审查修复字幕过期死锁、停顿对齐、就绪判定、长文性能、磁盘清理及若干细节；新增 `ReviewFixTests`（7 组）并更新 2 组既有断言（段间停顿保留、版本外置存储）。
-- 修改在 Linux 环境中完成，未能本地编译或运行测试；停顿对齐算法用 Python 逐行移植仿真验证。编译与 76 组回归以 GitHub Actions（macOS）结果为准。未调用真实付费接口。
+- 修改在 Linux 环境中完成，本地无法编译；停顿对齐算法用 Python 逐行移植仿真验证。
+- GitHub Actions（macos-14，Swift 5.10）运行 37746240650：`swift test` 全部通过，APP 与 DMG 打包成功。未调用真实付费接口，界面未做人工操作验证。
+- 此前 main 分支每次 CI 都在编译阶段失败：播放计时器在 `Task { @MainActor in }` 中引用 weak 捕获的 `self`，Swift 5.10 报 "reference to captured var 'self' in concurrently-executing code"（较新的本机 Xcode 不报）。本版已改写；CI 失败时会把编译错误和断言写成注解。
 
 ---
 
