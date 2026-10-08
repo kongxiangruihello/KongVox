@@ -38,7 +38,7 @@ enum AudioAssembly {
     }
     static func render(urls: [URL], gaps: [Double], normalize: Bool, to destination: URL? = nil, seam: SeamOptions? = nil) throws -> [Int64] {
         guard !urls.isEmpty, urls.count == gaps.count, gaps.allSatisfy({ $0.isFinite && (0...3).contains($0) }) else { throw VoxError(message: "音频合并参数不完整。") }
-        if let seam, seam.enabled { return try renderWithSeams(urls: urls, gaps: gaps, normalize: normalize, to: destination, options: seam) }
+        let seamOptions = seam.flatMap { $0.enabled ? $0 : nil }
         let temp = destination.map { $0.deletingLastPathComponent().appendingPathComponent(".\(UUID()).wav") }
         defer { if let temp { try? FileManager.default.removeItem(at: temp) } }
         var output: FileHandle?
@@ -47,7 +47,10 @@ enum AudioAssembly {
         var frames: [Int64] = [], total = 0
         for (i, url) in urls.enumerated() {
             try Task.checkCancellation()
-            let pcm = try prepare(Data(contentsOf: url), trimStart: i > 0 && gaps[i - 1] == 0, trimEnd: i < urls.count - 1 && gaps[i] == 0, normalize: normalize)
+            let joinedBefore = i > 0 && gaps[i - 1] == 0, joinedAfter = i < urls.count - 1 && gaps[i] == 0
+            var pcm = try prepare(Data(contentsOf: url), trimStart: joinedBefore, trimEnd: joinedAfter, normalize: normalize)
+            // Seam fades are applied per segment while streaming, so long mixes never sit in memory at once.
+            if let seamOptions { pcm = applySeam(pcm, fadeIn: joinedBefore, fadeOut: joinedAfter, options: seamOptions) }
             frames.append(Int64(pcm.count / 2))
             let silence = i < urls.count - 1 ? Int(gaps[i] * 24000) * 2 : 0
             total += pcm.count + silence
@@ -63,33 +66,34 @@ enum AudioAssembly {
         return frames
     }
 
-    private static func renderWithSeams(urls: [URL], gaps: [Double], normalize: Bool, to destination: URL?, options: SeamOptions) throws -> [Int64] {
-        var chunks: [Data] = []
-        for (index, url) in urls.enumerated() {
-            chunks.append(try prepare(Data(contentsOf: url), trimStart: index > 0 && gaps[index - 1] == 0, trimEnd: index < urls.count - 1 && gaps[index] == 0, normalize: normalize))
-        }
+    /// Renders the mix through the streaming path and returns its PCM, for analyses such as local pause alignment.
+    static func renderWithPCM(urls: [URL], gaps: [Double], normalize: Bool, seam: SeamOptions? = nil) throws -> (frames: [Int64], pcm: Data) {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let wav = folder.appendingPathComponent("mix.wav")
+        let frames = try render(urls: urls, gaps: gaps, normalize: normalize, to: wav, seam: seam)
+        let pcm = try AudioFiles.extractPCM(Data(contentsOf: wav))
+        return (frames, pcm)
+    }
+
+    /// Seam treatment for one prepared segment: overall gain, plus a fade-out / fade-in (no overlap) at gapless joins.
+    /// Sample counts never change, so subtitle and playback timelines stay identical with or without seams.
+    static func applySeam(_ data: Data, fadeIn: Bool, fadeOut: Bool, options: SeamOptions) -> Data {
         let fadeFrames = max(0, min(24000 / 2, options.crossfadeMilliseconds * 24))
-        func adjust(_ data: Data, first: Bool, last: Bool) -> Data {
-            guard fadeFrames > 0 || abs(options.gainAdjustment) > 0.001 else { return data }
-            var samples = stride(from: 0, to: data.count, by: 2).map { Int16(bitPattern: UInt16(data[$0]) | UInt16(data[$0 + 1]) << 8) }
-            let gain = pow(10.0, options.gainAdjustment / 20.0)
-            for i in samples.indices {
-                var value = Double(samples[i]) * gain
-                if first && i < fadeFrames { value *= Double(i) / Double(max(1, fadeFrames)) }
-                if last && i >= max(0, samples.count - fadeFrames) { value *= Double(samples.count - i) / Double(max(1, fadeFrames)) }
-                samples[i] = Int16(max(-32768, min(32767, value.rounded())))
-            }
-            var output = Data(capacity: samples.count * 2)
-            for sample in samples { let raw = UInt16(bitPattern: sample); output.append(UInt8(truncatingIfNeeded: raw)); output.append(UInt8(truncatingIfNeeded: raw >> 8)) }
-            return output
+        guard fadeFrames > 0 || abs(options.gainAdjustment) > 0.001 else { return data }
+        let base = data.startIndex
+        var samples = stride(from: 0, to: data.count - 1, by: 2).map { Int16(bitPattern: UInt16(data[base + $0]) | UInt16(data[base + $0 + 1]) << 8) }
+        let gain = pow(10.0, options.gainAdjustment / 20.0)
+        for i in samples.indices {
+            var value = Double(samples[i]) * gain
+            if fadeIn && i < fadeFrames { value *= Double(i) / Double(max(1, fadeFrames)) }
+            if fadeOut && i >= max(0, samples.count - fadeFrames) { value *= Double(samples.count - i) / Double(max(1, fadeFrames)) }
+            samples[i] = Int16(max(-32768, min(32767, value.rounded())))
         }
-        for i in chunks.indices { chunks[i] = adjust(chunks[i], first: i > 0 && gaps[i - 1] == 0, last: i + 1 < chunks.count && gaps[i] == 0) }
-        let frames = chunks.map { Int64($0.count / 2) }
-        guard let destination else { return frames }
-        var pcm = Data()
-        for (i, chunk) in chunks.enumerated() { pcm.append(chunk); if i + 1 < chunks.count { pcm.append(Data(count: Int(gaps[i] * 24000) * 2)) } }
-        try AudioFiles.writePCM(pcm, to: destination)
-        return frames
+        var output = Data(capacity: samples.count * 2)
+        for sample in samples { let raw = UInt16(bitPattern: sample); output.append(UInt8(truncatingIfNeeded: raw)); output.append(UInt8(truncatingIfNeeded: raw >> 8)) }
+        return output
     }
 }
 
@@ -99,8 +103,9 @@ enum ExportBundle {
         let staging = destination.deletingLastPathComponent().appendingPathComponent(".\(UUID()).zip")
         defer { try? FileManager.default.removeItem(at: folder); try? FileManager.default.removeItem(at: staging) }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let frames = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: normalize, to: folder.appendingPathComponent("配音.wav"), seam: seam)
-        try (captionProject.map { try $0.captionContent(frames: frames) } ?? Subtitles.render(texts: texts, frames: frames, gaps: gaps, style: subtitleStyle)).write(to: folder.appendingPathComponent("配音.srt"), atomically: true, encoding: .utf8)
+        let audio = folder.appendingPathComponent("配音.wav")
+        let frames = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: normalize, to: audio, seam: seam)
+        try (captionProject.map { try $0.captionContent(frames: frames, renderedAudio: audio) } ?? Subtitles.render(texts: texts, frames: frames, gaps: gaps, style: subtitleStyle)).write(to: folder.appendingPathComponent("配音.srt"), atomically: true, encoding: .utf8)
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         process.arguments = ["-c", "-k", "--norsrc", folder.path, staging.path]
         process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice

@@ -12,6 +12,7 @@ extension Project {
     @Published var showRepair = false
     @Published var showCaptions = false
     @Published var showGenerate = false
+    @Published var confirmClearCaptions = false
     var revision = Data()
 }
 struct DeliveryView: View {
@@ -34,7 +35,10 @@ struct DeliveryView: View {
             if let p = studio.project, let report = state.report {
                 Text("\(p.title) · \(p.segments.count) 个片段 · \(report.duration.map { Studio.timeLabel($0) } ?? "时长待就绪")").font(.headline)
                 Text("未完成 \(report.missing.count) 段 · 有未采用匹配版本 \(report.candidates.count) 段 · 音频提示 \(report.findings.count) 条").font(.callout)
-                Text("字幕：\(p.resolvedSubtitleStyle.rawValue)\(p.captionEdits == nil ? " · 自动" : " · 手工编辑")").font(.caption)
+                HStack {
+                    Text("字幕：\(p.resolvedSubtitleStyle.rawValue)\(p.captionEdits == nil ? " · 自动" : p.captionsStale ? " · 手工编辑（已过期）" : " · 手工编辑")").font(.caption)
+                    if p.captionEdits != nil { Button("清除手工字幕…") { state.confirmClearCaptions = true }.font(.caption).disabled(studio.isWorking) }
+                }
                 if report.needsPreparation { Text("文稿为空、尚有未加入的草稿或处理范围待更新。请返回编辑或检查生成范围。").foregroundStyle(.red).font(.caption) }
                 if let message = report.renderError { Text(message).foregroundStyle(.red).font(.caption) }
                 if let message = report.subtitleError { Text(message).foregroundStyle(.red).font(.caption) }
@@ -79,6 +83,9 @@ struct DeliveryView: View {
         .sheet(isPresented: $state.showRepair) { if let id = state.repairID { SegmentRepair(segmentID: id).environmentObject(studio) } }
         .sheet(isPresented: $state.showCaptions) { CaptionEditor().environmentObject(studio) }
         .sheet(isPresented: $state.showGenerate) { GenerationReview().environmentObject(studio) }
+        .confirmationDialog("清除已保存的手工字幕？", isPresented: $state.confirmClearCaptions) {
+            Button("清除并改用自动字幕", role: .destructive) { studio.clearCaptionEdits(); Task { await refresh() } }
+        } message: { Text("音频和文稿不受影响。清除后无法撤销，除非恢复之前保存的项目版本。") }
         .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil } } message: { Text(studio.error ?? "") }
     }
     @MainActor func refresh() async {

@@ -32,8 +32,17 @@ import UniformTypeIdentifiers
     var playbackProject: UUID?
     private var usageCache: UsageEstimate?
     @Published var playing = false
-    @Published var playbackTime = 0.0
+    /// The 20 Hz playhead lives in its own object so playback does not re-render every view observing the studio.
+    let clock = PlaybackClock()
+    var playbackTime: Double {
+        get { clock.time }
+        set { if clock.time != newValue { clock.time = newValue } }
+    }
     @Published var playbackDuration = 0.0
+    /// Debounced save for high-frequency edits (typing, sliders); flushed by any explicit save and on quit.
+    private var pendingSave: Task<Void, Never>?
+    /// In-memory cache of version files under Versions/, loaded per project on first access.
+    private var versionCache: [UUID: [ProjectVersion]] = [:]
     @Published var notificationsEnabled = false
     @Published var progress = 0.0
     let root: URL
@@ -106,7 +115,44 @@ import UniformTypeIdentifiers
                 projects[i].taskState = "待继续"; projects[i].taskMessage = "上次运行已中断，已完成片段会复用。"
             }
         }
+        migrateVersionsOutOfProjects()
         selected = projects.first?.id
+    }
+    // MARK: Version snapshots (stored under Versions/, not in projects.json)
+    func versionsFile(_ id: UUID) -> URL { root.appendingPathComponent("Versions").appendingPathComponent(id.uuidString + ".json") }
+    /// Throws when an existing version file cannot be read, so callers never overwrite it with an empty list.
+    func loadVersions(_ id: UUID) throws -> [ProjectVersion] {
+        if let cached = versionCache[id] { return cached }
+        let file = versionsFile(id)
+        let values: [ProjectVersion] = try FileManager.default.fileExists(atPath: file.path) ? JSONDecoder().decode([ProjectVersion].self, from: Data(contentsOf: file)) : []
+        versionCache[id] = values
+        return values
+    }
+    func versions(for id: UUID) -> [ProjectVersion] { (try? loadVersions(id)) ?? [] }
+    func writeVersions(_ values: [ProjectVersion], for id: UUID) throws {
+        let file = versionsFile(id)
+        if values.isEmpty {
+            if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+        } else {
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(values).write(to: file, options: .atomic)
+        }
+        versionCache[id] = values
+    }
+    /// 0.11.3: snapshots used to live inside each project, so every edit rewrote up to 30 full copies.
+    /// Move them to one file per project; a project keeps its inline versions if moving fails.
+    private func migrateVersionsOutOfProjects() {
+        guard storageAvailable, projects.contains(where: { !($0.versions ?? []).isEmpty }) else { return }
+        for i in projects.indices {
+            guard let inline = projects[i].versions, !inline.isEmpty else { projects[i].versions = nil; continue }
+            do {
+                let existing = try loadVersions(projects[i].id)
+                let known = Set(existing.map(\.id))
+                try writeVersions(Array((existing + inline.filter { !known.contains($0.id) }).suffix(30)), for: projects[i].id)
+                projects[i].versions = nil
+            } catch { self.error = "项目版本迁移未完成，已保留原记录：\(error.localizedDescription)" }
+        }
+        save()
     }
     func makeProject() -> Project {
         var p = Project()
@@ -153,14 +199,34 @@ import UniformTypeIdentifiers
     }
     var project: Project? { projects.first { $0.id == selected } }
     @discardableResult func save() -> Bool {
+        // Any full save also covers a pending debounced save.
+        pendingSave?.cancel(); pendingSave = nil
         guard storageAvailable else { return false }
         do { try JSONEncoder().encode(projects).write(to: root.appendingPathComponent("projects.json"), options: .atomic); return true }
         catch { self.error = "保存失败：\(error.localizedDescription)"; return false }
     }
     func edit(_ change: (inout Project) -> Void) {
-        guard !isWorking, let index = projects.firstIndex(where: { $0.id == selected }) else { return }
+        guard applyEdit(change) else { return }
+        save()
+    }
+    /// Same as `edit`, but for high-frequency inputs (typing, sliders): the change applies now and is written
+    /// to disk after input pauses, instead of re-encoding every project on each keystroke.
+    func editLive(_ change: (inout Project) -> Void) {
+        guard applyEdit(change) else { return }
+        pendingSave?.cancel()
+        pendingSave = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled else { return }
+            self?.save()
+        }
+    }
+    /// Writes a pending debounced edit immediately (called on quit and before leaving the editor).
+    func flushPendingSave() { if pendingSave != nil { save() } }
+    private func applyEdit(_ change: (inout Project) -> Void) -> Bool {
+        guard !isWorking, let index = projects.firstIndex(where: { $0.id == selected }) else { return false }
         stop()
-        change(&projects[index]); preflightMessage = "配置或文稿已改变，可重新检查。"; findings = []; qualitySummary = "内容已改变，请重新检查"; save()
+        change(&projects[index]); preflightMessage = "配置或文稿已改变，可重新检查。"; findings = []; qualitySummary = "内容已改变，请重新检查"
+        return true
     }
     func newProject() {
         guard !isWorking else { return }
@@ -187,13 +253,16 @@ import UniformTypeIdentifiers
     var fullAudioReady: Bool { (try? currentURLs()) != nil }
     var fullProgress: Double {
         guard let p = project, !p.segments.isEmpty, !(p.isLongMode && p.needsLongPreparation) else { return 0 }
-        return Double(p.segments.filter { ready($0, settings: p.settings) }.count) / Double(p.segments.count)
+        return Double(p.segments.filter { ready($0, in: p) }.count) / Double(p.segments.count)
     }
     func audioURL(_ take: Take) -> URL { root.appendingPathComponent("Audio").appendingPathComponent(take.file) }
+    /// Readiness judged against the project that owns the segment.
+    func ready(_ segment: Segment, in project: Project) -> Bool { project.isReady(segment, root: root) }
+    /// Readiness for a segment of the selected project (main editor). Prefer `ready(_:in:)` when the project is known.
     func ready(_ segment: Segment, settings: VoiceSettings) -> Bool {
-        guard segment.ready(settings), segment.current.map({ FileManager.default.fileExists(atPath: audioURL($0).path) }) == true else { return false }
-        if settings.contextHintEnabled == true, let p = project { return segment.contextFingerprint == p.contextFingerprint(for: segment.id) }
-        return true
+        var owner = project ?? Project()
+        owner.settings = settings
+        return owner.isReady(segment, root: root)
     }
     func saveBatchBudget() {
         guard storageAvailable else { return }
@@ -224,7 +293,7 @@ import UniformTypeIdentifiers
         var result = UsageEstimate()
         for segment in p.segments {
             let count = p.settings.reading(segment.spokenText).count; result.total += count
-            if ready(segment, settings: p.settings) { result.reuse += count }
+            if ready(segment, in: p) { result.reuse += count }
             else if FileManager.default.fileExists(atPath: recoveryFile(segment, project: p).path) { result.recover += count }
             else { result.generate += count }
         }
@@ -244,7 +313,7 @@ import UniformTypeIdentifiers
         guard !isWorking, storageAvailable, let index = projects.firstIndex(where: { $0.id == selected }) else { return }
         if projects[index].isLongMode { projects[index].prepareLongDocument(); guard save() else { return } }
         guard let p = project, let first = p.segments.first else { return }
-        if ready(first, settings: p.settings), let take = first.current { playOpening(audioURL(take)) }
+        if ready(first, in: p), let take = first.current { playOpening(audioURL(take)) }
         else { generate(only: first.id, opening: true) }
     }
     func playOpening(_ url: URL) {
@@ -262,7 +331,7 @@ import UniformTypeIdentifiers
             guard save() else { return }
         }
         guard let snapshot = project else { return }
-        let pending = snapshot.segments.filter { (scope == nil || scope!.contains($0.id)) && (only == nil ? (force || !ready($0, settings: snapshot.settings)) : $0.id == only) }
+        let pending = snapshot.segments.filter { (scope == nil || scope!.contains($0.id)) && (only == nil ? (force || !ready($0, in: snapshot)) : $0.id == only) }
         guard pending.allSatisfy({ snapshot.settings.reading($0.spokenText).count <= snapshot.chunkLimit }) else {
             error = "发音替换后的片段超过服务长度限制，请缩短替代读法或在段落精调中拆分。"; return
         }
@@ -381,7 +450,7 @@ import UniformTypeIdentifiers
         guard !isWorking, let p = project else { return }
         guard !(p.isLongMode && p.needsLongPreparation) else { error = "请先更新处理片段。"; return }
         let indices = p.segments.indices.filter { chapter.segmentIDs.contains(p.segments[$0].id) }
-        guard !indices.isEmpty, indices.allSatisfy({ ready(p.segments[$0], settings: p.settings) }) else { error = "本章尚有未更新的音频，请先生成本章。"; return }
+        guard !indices.isEmpty, indices.allSatisfy({ ready(p.segments[$0], in: p) }) else { error = "本章尚有未更新的音频，请先生成本章。"; return }
         let urls = indices.map { audioURL(p.segments[$0].current!) }, gaps = indices.map { p.gaps[$0] }, seam = p.resolvedSeam
         var destination = root.appendingPathComponent("chapter-preview.wav")
         if export {
@@ -438,7 +507,9 @@ import UniformTypeIdentifiers
                         }
                         if player.isPlaying { self.playbackTime = player.currentTime }
                         else if self.playing { self.playing = false; self.playbackTime = player.duration }
-                        self.readingSegment = PlaybackTimeline.current(self.playbackTime, cues: self.playbackCues)
+                        // @Published fires on every assignment; only publish when the highlighted segment changes.
+                        let reading = PlaybackTimeline.current(self.playbackTime, cues: self.playbackCues)
+                        if reading != self.readingSegment { self.readingSegment = reading }
                     }
                 }
             }
@@ -457,7 +528,7 @@ import UniformTypeIdentifiers
     func currentURLs() throws -> [URL] {
         guard let p = project, !p.segments.isEmpty else { throw VoxError(message: "请先添加文稿。") }
         guard !(p.isLongMode && p.needsLongPreparation) else { throw VoxError(message: "全文已修改，请点击「生成全文」更新后再试听或导出。") }
-        guard p.segments.allSatisfy({ ready($0, settings: p.settings) }) else { throw VoxError(message: "有未生成或已修改的段落，请先生成最新配音。") }
+        guard p.segments.allSatisfy({ ready($0, in: p) }) else { throw VoxError(message: "有未生成或已修改的段落，请先生成最新配音。") }
         return p.segments.compactMap { $0.current.map(audioURL) }
     }
     func playAll(from segmentID: UUID? = nil) {
@@ -497,8 +568,15 @@ import UniformTypeIdentifiers
                 defer { busy = false; task = nil }
                 do {
                     try await Task.detached {
-                        let frames = try AudioAssembly.render(urls: urls, gaps: p.gaps, normalize: p.levelsEnabled, seam: p.resolvedSeam)
-                        let content = try p.captionContent(frames: frames)
+                        let frames: [Int64]
+                        var pcm: Data?
+                        if p.needsAlignmentPCM {
+                            let mixed = try AudioAssembly.renderWithPCM(urls: urls, gaps: p.gaps, normalize: p.levelsEnabled, seam: p.resolvedSeam)
+                            frames = mixed.frames; pcm = mixed.pcm
+                        } else {
+                            frames = try AudioAssembly.render(urls: urls, gaps: p.gaps, normalize: p.levelsEnabled, seam: p.resolvedSeam)
+                        }
+                        let content = try p.captionContent(frames: frames, pcm: pcm)
                         try content.write(to: destination, atomically: true, encoding: .utf8)
                     }.value
                     status = "已导出段落字幕：\(destination.lastPathComponent)"
@@ -552,11 +630,17 @@ import UniformTypeIdentifiers
                         result = folder.appendingPathComponent("mix.mp3")
                         let output = result
                         try await Task.detached {
-                            let process = Process(); process.executableURL = executable
+                            let process = Process(), errors = Pipe(); process.executableURL = executable
                             process.arguments = ["-nostdin", "-v", "error", "-i", wav.path, "-codec:a", "libmp3lame", "-b:a", "192k", output.path]
-                            process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-                            try process.run(); process.waitUntilExit()
-                            guard process.terminationStatus == 0 else { throw VoxError(message: "MP3 转换失败，请改用 WAV 导出。") }
+                            process.standardOutput = FileHandle.nullDevice; process.standardError = errors
+                            try process.run()
+                            // Drain stderr before waiting so a chatty FFmpeg cannot block on a full pipe.
+                            let detail = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                            process.waitUntilExit()
+                            guard process.terminationStatus == 0 else {
+                                let reason = detail.split(whereSeparator: \.isNewline).last.map { "（FFmpeg：\(String($0).prefix(160))）" } ?? ""
+                                throw VoxError(message: "MP3 转换失败\(reason)，请改用 WAV 导出。")
+                            }
                         }.value
                     }
                     // Copy alongside destination first; never destroy an existing export on conversion failure.

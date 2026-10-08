@@ -15,13 +15,13 @@ struct GenerationReview: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("确认本次生成范围").font(.title2.bold())
             if let p = studio.project {
-                let impact = GenerationImpact(p, selected: state.selected, force: state.force, ready: { studio.ready($0, settings: p.settings) }, recovery: { studio.hasRecovery($0) })
+                let impact = GenerationImpact(p, selected: state.selected, force: state.force, ready: { studio.ready($0, in: p) }, recovery: { studio.hasRecovery($0) })
                 Text("\(p.settings.resolvedService.name) · \(p.settings.voice) · 提交正文按服务商实际计费").font(.caption)
                 Text("新请求 \(impact.generate) 字 · 恢复下载 \(impact.recover) 字 · 所选复用 \(impact.reuse) 字 · 未选保持 \(impact.untouched) 字").font(.headline)
                 Text("仅提交勾选且需要处理的内容；下方展开可核对词典替换后的完整读法。旧音频保留，批量重做不会删除历史。").font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button("全选范围内") { state.selected = Set(p.segments.filter { scope == nil || scope!.contains($0.id) }.map(\.id)) }
-                    Button("只选待更新") { state.force = false; state.selected = Set(p.segments.filter { (scope == nil || scope!.contains($0.id)) && !studio.ready($0, settings: p.settings) }.map(\.id)) }
+                    Button("只选待更新") { state.force = false; state.selected = Set(p.segments.filter { (scope == nil || scope!.contains($0.id)) && !studio.ready($0, in: p) }.map(\.id)) }
                     Button("全不选") { state.selected = [] }
                 }
                 List {
@@ -65,9 +65,9 @@ struct GenerationReview: View {
     func scopedIssues(_ p: Project, ids: Set<UUID>) -> [PreflightIssue] { var copy = p; copy.segments = p.segments.filter { ids.contains($0.id) }; return ServicePreflight.inspect(copy, catalog: studio.catalog) }
     func label(_ s: Segment, _ p: Project) -> String {
         if !state.selected.contains(s.id) { return "不处理" }
-        if studio.ready(s, settings: p.settings) && !state.force { return "复用" }
+        if studio.ready(s, in: p) && !state.force { return "复用" }
         if studio.hasRecovery(s) { return "恢复下载" }
-        if studio.ready(s, settings: p.settings) { return "主动重做" }
+        if studio.ready(s, in: p) { return "主动重做" }
         if s.current != nil { return "文稿/声音变更或文件缺失" }
         return "尚未生成或未采用"
     }
@@ -158,7 +158,7 @@ struct LongFormWorkbench: View {
                         Text(p.title).font(.headline); Spacer()
                         Text(p.id == studio.activeProject ? "生成中" : (p.isLongMode && p.needsLongPreparation) ? "文稿待更新" : p.taskState ?? "待生成")
                     }
-                    let done = p.segments.filter { studio.ready($0, settings: p.settings) }.count
+                    let done = p.segments.filter { studio.ready($0, in: p) }.count
                     ProgressView(value: Double(done), total: Double(max(1, p.segments.count)))
                     Text("\(done) / \(p.segments.count) 片段就绪").font(.caption)
                     if let message = p.taskMessage { Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(4) }

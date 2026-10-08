@@ -22,6 +22,8 @@ final class ViewState: ObservableObject {
     @Published var showSettings = false
     @Published var showWelcome = false
     var configureAfterWelcome = false
+    @Published var deleteID: UUID?
+    @Published var cleanupPlan: AudioCleanupPlan?
     @Published var key = ""
     @Published var message = ""
 }
@@ -40,21 +42,30 @@ struct StudioView: View {
                             Text(p.title).font(.headline).lineLimit(1)
                             Text(p.isLongMode ? "长文 · \(p.fullText.count) 字" : "段落 · \(p.segments.count) 段").font(.caption).foregroundStyle(.secondary)
                         }.padding(.vertical, 6).tag(p.id)
+                        .contextMenu { Button("删除项目…", role: .destructive) { state.deleteID = p.id } }
                     }
                 }.listStyle(.sidebar).disabled(studio.isWorking)
                 Button { state.showSettings = true } label: { Label("服务设置", systemImage: "key") }.disabled(studio.isWorking)
                 Button("成品交付检查") { state.exportFormat = "zip"; state.showDelivery = true }.disabled(studio.isWorking)
                 Button("项目版本与回滚") { state.showVersions = true }.disabled(studio.isWorking)
                 Button("成品检查 / 对比") { state.showFinishedReview = true }
-                Menu("项目备份") {
+                Menu("项目备份与整理") {
                     Button("备份当前项目…") { studio.chooseBackup() }
                     Button("从备份恢复为新项目…") { studio.chooseRestore() }
+                    Divider()
+                    Button("删除当前项目…") { state.deleteID = studio.selected }
+                    Button("清理未引用音频…") {
+                        do {
+                            let plan = try studio.audioCleanupPlan()
+                            if plan.files.isEmpty { studio.status = "没有未引用的音频文件。" } else { state.cleanupPlan = plan }
+                        } catch { studio.error = error.localizedDescription }
+                    }
                 }.disabled(studio.isWorking)
                 Button("长文精修 / 音色收藏") { state.showPrecision = true }
                 Button("文稿导入 / 批量工作台") { state.showBatch = true }
                 Button("长文工作台 / 任务") { state.showTools = true }
                 Button("使用指南") { state.showWelcome = true }.font(.caption)
-                Text("KongVox 0.11.2 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
+                Text("KongVox \(AppInfo.version) · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
             }.padding(18).navigationSplitViewColumnWidth(230)
         } detail: {
             VStack(spacing: 0) {
@@ -83,7 +94,7 @@ struct StudioView: View {
                                     Text("\(p.fullText.count) 字").font(.caption).foregroundStyle(.secondary)
                                 }
                                 Text("粘贴整篇文章，点击「生成全文」。后台自动处理，完成后试听或导出一份完整音频。").font(.caption).foregroundStyle(.secondary)
-                                TextEditor(text: Binding(get: { studio.project?.fullText ?? "" }, set: { text in studio.edit { $0.longText = text } }))
+                                TextEditor(text: Binding(get: { studio.project?.fullText ?? "" }, set: { text in studio.editLive { $0.longText = text } }))
                                     .font(.system(size: 16)).lineSpacing(6).padding(12)
                                     .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
                                     .accessibilityLabel("完整文章编辑区")
@@ -94,7 +105,7 @@ struct StudioView: View {
                                 }
                                 Text("需要发音修正、单段重做或处理下载缓存时，可切换「段落精调」。").font(.caption2).foregroundStyle(.secondary)
                             } else {
-                            HStack { Text("配音文稿").font(.headline); Spacer(); Text("\(p.segments.reduce(0) { $0 + $1.spokenText.count }) 字 · \(p.segments.filter { studio.ready($0, settings: p.settings) }.count)/\(p.segments.count) 段就绪").font(.caption).foregroundStyle(.secondary) }
+                            HStack { Text("配音文稿").font(.headline); Spacer(); Text("\(p.segments.reduce(0) { $0 + $1.spokenText.count }) 字 · \(p.segments.filter { studio.ready($0, in: p) }.count)/\(p.segments.count) 段就绪").font(.caption).foregroundStyle(.secondary) }
                             ScrollView {
                                 LazyVStack(spacing: 14) {
                                     ForEach(Array(p.segments.enumerated()), id: \.element.id) { index, segment in
@@ -134,13 +145,15 @@ struct StudioView: View {
         .sheet(isPresented: $state.showReview) { GenerationReview().environmentObject(studio) }
         .sheet(isPresented: $state.showSettings) { ServiceSettings().environmentObject(studio) }
         .onChange(of: studio.selected) { _ in studio.stop(); studio.findings = []; studio.qualitySummary = "尚未检查" }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in studio.flushPendingSave() }
+        .modifier(MaintenanceDialogs(state: state))
         .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil }; if !studio.diagnostic.isEmpty { Button("复制诊断") { studio.copyDiagnostic(); studio.error = nil } } } message: { Text(studio.error ?? "") }
     }
     func finishWelcome() {
         UserDefaults.standard.set(true, forKey: "welcomeSeen05"); state.showWelcome = false
     }
     func bind<T>(_ key: WritableKeyPath<Project,T>, fallback: T) -> Binding<T> {
-        Binding(get: { studio.project?[keyPath: key] ?? fallback }, set: { value in studio.edit { $0[keyPath: key] = value } })
+        Binding(get: { studio.project?[keyPath: key] ?? fallback }, set: { value in studio.editLive { $0[keyPath: key] = value } })
     }
     func settingsPanel(_ p: Project) -> some View {
         ScrollView { VStack(alignment: .leading, spacing: 18) {
@@ -196,13 +209,7 @@ struct StudioView: View {
         let usage = studio.usageEstimate
         return VStack(alignment: .leading, spacing: 10) {
             if studio.playbackDuration > 0 {
-                HStack(spacing: 12) {
-                    Button { studio.skip(-10) } label: { Image(systemName: "gobackward.10") }.help("后退 10 秒")
-                    Text(Studio.timeLabel(studio.playbackTime)).monospacedDigit().font(.caption)
-                    Slider(value: Binding(get: { studio.playbackTime }, set: { studio.seek($0) }), in: 0...max(0.01, studio.playbackDuration)).accessibilityLabel("播放进度")
-                    Text(Studio.timeLabel(studio.playbackDuration)).monospacedDigit().font(.caption)
-                    Button { studio.skip(10) } label: { Image(systemName: "goforward.10") }.help("前进 10 秒")
-                }.disabled(studio.isWorking)
+                PlaybackScrubber(clock: studio.clock, label: "播放进度").disabled(studio.isWorking)
             }
             Text("预计本次合成 \(usage.generate) 字 · 可复用 \(usage.reuse) 字 · 待恢复 \(usage.recover) 字（按服务商实际计费）").font(.caption).foregroundStyle(.secondary)
         HStack(spacing: 14) {
@@ -233,7 +240,47 @@ struct StudioView: View {
         }.padding(18)
     }
 }
-@MainActor final class SegmentControls: ObservableObject { @Published var discardCache = false; @Published var showRepair = false; @Published var showGenerate = false }
+/// Confirmations for deleting a project and for removing unreferenced audio files.
+struct MaintenanceDialogs: ViewModifier {
+    @EnvironmentObject var studio: Studio
+    @ObservedObject var state: ViewState
+    var deleteTitle: String { studio.projects.first { $0.id == state.deleteID }?.title ?? "" }
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog("删除这个项目？", isPresented: Binding(get: { state.deleteID != nil }, set: { if !$0 { state.deleteID = nil } })) {
+                Button("删除项目", role: .destructive) {
+                    if let id = state.deleteID { studio.deleteProject(id) }
+                    state.deleteID = nil
+                }
+            } message: {
+                Text("「\(deleteTitle)」将从列表移除，版本快照和下载缓存一并删除，无法撤销，建议先备份。音频文件暂时保留，可再用「清理未引用音频」释放空间。")
+            }
+            .confirmationDialog("清理未引用的音频？", isPresented: Binding(get: { state.cleanupPlan != nil }, set: { if !$0 { state.cleanupPlan = nil } })) {
+                Button("删除 \(state.cleanupPlan?.files.count ?? 0) 个文件", role: .destructive) {
+                    if let plan = state.cleanupPlan { studio.cleanUnreferencedAudio(plan) }
+                    state.cleanupPlan = nil
+                }
+            } message: {
+                Text("共约 \(state.cleanupPlan?.sizeLabel ?? "")。这些文件不属于任何项目、归档片段或已保存版本，删除后无法恢复；已导出的成品和备份文件不受影响。")
+            }
+    }
+}
+/// Observes only the playhead clock, so 20 Hz updates re-render this bar and nothing else.
+struct PlaybackScrubber: View {
+    @EnvironmentObject var studio: Studio
+    @ObservedObject var clock: PlaybackClock
+    var label: String
+    var body: some View {
+        HStack(spacing: 12) {
+            Button { studio.skip(-10) } label: { Image(systemName: "gobackward.10") }.help("后退 10 秒")
+            Text(Studio.timeLabel(clock.time)).monospacedDigit().font(.caption)
+            Slider(value: Binding(get: { clock.time }, set: { studio.seek($0) }), in: 0...max(0.01, studio.playbackDuration)).accessibilityLabel(label)
+            Text(Studio.timeLabel(studio.playbackDuration)).monospacedDigit().font(.caption)
+            Button { studio.skip(10) } label: { Image(systemName: "goforward.10") }.help("前进 10 秒")
+        }
+    }
+}
+@MainActor final class SegmentControls: ObservableObject { @Published var discardCache = false; @Published var showRepair = false; @Published var showGenerate = false; @Published var confirmDelete = false }
 struct SegmentCard: View {
     @StateObject private var controls = SegmentControls()
     @EnvironmentObject var studio: Studio
@@ -241,7 +288,7 @@ struct SegmentCard: View {
     let segment: Segment
     let settings: VoiceSettings
     func binding(_ key: WritableKeyPath<Segment,String>) -> Binding<String> {
-        Binding(get: { studio.project?.segments.first { $0.id == segment.id }?[keyPath: key] ?? "" }, set: { value in studio.edit { p in if let i = p.segments.firstIndex(where: { $0.id == segment.id }) { p.segments[i][keyPath: key] = value } } })
+        Binding(get: { studio.project?.segments.first { $0.id == segment.id }?[keyPath: key] ?? "" }, set: { value in studio.editLive { p in if let i = p.segments.firstIndex(where: { $0.id == segment.id }) { p.segments[i][keyPath: key] = value } } })
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -251,7 +298,7 @@ struct SegmentCard: View {
                     .font(.caption).padding(.horizontal, 8).padding(.vertical, 4).background(studio.ready(segment, settings: settings) ? Color.green.opacity(0.12) : Color.orange.opacity(0.12), in: Capsule())
                 Spacer()
                 Text("\(segment.spokenText.count) 字").font(.caption).foregroundStyle(.secondary)
-                Button { studio.edit { $0.segments.removeAll { $0.id == segment.id } } } label: { Image(systemName: "trash") }.help("移除这个段落")
+                Button { controls.confirmDelete = true } label: { Image(systemName: "trash") }.help("移除这个段落")
             }
             TextField("文稿", text: binding(\.text), axis: .vertical).textFieldStyle(.plain).font(.system(size: 16)).lineSpacing(6)
             DisclosureGroup("发音修正（可选，不改原稿）") { TextField("输入这一段的完整朗读替代文本", text: binding(\.pronunciation), axis: .vertical).textFieldStyle(.roundedBorder) }.font(.caption).foregroundStyle(.secondary)
@@ -279,6 +326,9 @@ struct SegmentCard: View {
         .confirmationDialog("放弃已生成的下载结果？", isPresented: $controls.discardCache) {
             Button("放弃缓存", role: .destructive) { studio.discardRecovery(segment) }
         } message: { Text("之后点击生成将重新请求服务，可能再次计费。") }
+        .confirmationDialog("移除这个段落？", isPresented: $controls.confirmDelete) {
+            Button("移除段落", role: .destructive) { studio.edit { $0.segments.removeAll { $0.id == segment.id } } }
+        } message: { Text("文稿和该段的历史版本会从项目中移除，只能通过之前保存的项目版本找回。") }
         .padding(18).background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 14)).overlay(RoundedRectangle(cornerRadius: 14).stroke(.quaternary))
     }
 }

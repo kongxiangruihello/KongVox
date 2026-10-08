@@ -68,6 +68,10 @@ enum AudioQuality {
             guard segment.ready(p.settings), let take = segment.current else {
                 add("尚未生成或音频已过期"); previousDB = nil; continue
             }
+            // Same rule as Project.isReady: with context hints on, changed neighbours make the take stale.
+            if p.settings.contextHintEnabled == true, segment.contextFingerprint != p.contextFingerprint(for: segment.id) {
+                add("前后句已改变，需按新语境重新生成"); previousDB = nil; continue
+            }
             do {
                 let pcm = try AudioFiles.extractPCM(Data(contentsOf: root.appendingPathComponent("Audio").appendingPathComponent(take.file)))
                 let frames = pcm.count / 2

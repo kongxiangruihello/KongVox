@@ -20,5 +20,5 @@ jobs:
         with:
           name: KongVox-Mac
           path: |
-            dist/KongVox-0.11.2-Mac.zip
-            dist/KongVox-0.11.2-Mac.dmg
+            dist/KongVox-*-Mac.zip
+            dist/KongVox-*-Mac.dmg

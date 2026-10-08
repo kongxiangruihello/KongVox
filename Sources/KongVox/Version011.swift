@@ -40,7 +40,6 @@ struct BatchBudget: Codable, Equatable {
     var maxYuan = 0.0
     var yuanPerTenThousand = 1.0
     var maxCharacters = 0
-    var maxConcurrent = 1
     var enabled: Bool { maxYuan > 0 || maxCharacters > 0 }
 }
 
@@ -66,15 +65,23 @@ extension Project {
 }
 
 enum Version011Tools {
+    /// Search radius around the proportional estimate, in milliseconds.
+    static let pauseSearchRadius: Int64 = 400
+    /// Moves sentence boundaries inside a segment to a clearly quieter point near the proportional estimate.
+    /// Segment boundaries come from real audio and keep their pauses, so they are never moved.
     static func localPauseCues(texts: [String], frames: [Int64], gaps: [Double], style: SubtitleStyle, pcm: Data) throws -> [CaptionCue] {
         let baseline = try Subtitles.cues(texts: texts, frames: frames, gaps: gaps, style: style)
-        guard pcm.count >= 2 else { return baseline }
-        let samples = pcm.withUnsafeBytes { raw -> [Int16] in
-            let values = raw.bindMemory(to: Int16.self)
-            return Array(values)
-        }
-        guard !samples.isEmpty else { return baseline }
+        guard style != .paragraph, baseline.count > 1, pcm.count >= 2 else { return baseline }
+        // Canonical PCM is little-endian Int16; decode explicitly instead of rebinding memory.
+        let base = pcm.startIndex
+        let samples = stride(from: 0, to: pcm.count - 1, by: 2).map { Int16(bitPattern: UInt16(pcm[base + $0]) | UInt16(pcm[base + $0 + 1]) << 8) }
         let duration = CaptionTimeline.duration(frames: frames, gaps: gaps)
+        // Same clock as Subtitles.cues: the last cue of each segment ends exactly here.
+        var segmentEnds = Set<Int64>(), cursor: Int64 = 0
+        for (i, count) in frames.enumerated() {
+            segmentEnds.insert(CaptionTimeline.milliseconds(cursor + count))
+            cursor += count + Int64(gaps[i] * 24000)
+        }
         func energy(_ ms: Int64) -> Double {
             let frame = max(0, min(samples.count - 1, Int(ms * 24)))
             let radius = min(720, samples.count / 20)
@@ -84,19 +91,22 @@ enum Version011Tools {
             return sum / Double(max(1, radius * 2))
         }
         var output = baseline
-        for i in 0..<max(0, output.count - 1) {
-            let lower = output[i].start + 80
-            let upper = min(output[i].end - 80, output[i + 1].end - 80)
+        let margin: Int64 = 80, step: Int64 = 20
+        for i in 0..<(output.count - 1) {
+            let boundary = output[i].end
+            guard !segmentEnds.contains(boundary), output[i + 1].start == boundary else { continue }
+            let lower = max(output[i].start + margin, boundary - pauseSearchRadius)
+            let upper = min(output[i + 1].end - margin, boundary + pauseSearchRadius)
             guard upper > lower else { continue }
-            let step: Int64 = 20
-            var candidate = output[i].end
-            var best = energy(candidate)
-            var position = lower
+            let original = energy(boundary)
+            var best = original, candidate = boundary, position = lower
             while position <= upper {
                 let value = energy(position)
                 if value < best { best = value; candidate = position }
                 position += step
             }
+            // Keep the proportional estimate unless the pause is clearly quieter than it.
+            guard candidate != boundary, best < original * 0.5 else { continue }
             output[i].end = candidate; output[i + 1].start = candidate
         }
         try CaptionTimeline.validate(output, duration: duration)
@@ -105,10 +115,17 @@ enum Version011Tools {
 
     static func ass(cues: [CaptionCue], duration: Int64, style: ShortVideoTemplate) throws -> String {
         try CaptionTimeline.validate(cues, duration: duration)
-        func time(_ ms: Int64) -> String { String(format: "%d:%02d:%02d.%02d", ms / 3600000, ms / 60000 % 60, ms / 1000 % 60, ms / 10 % 100) }
+        func time(_ ms: Int64) -> String { String(format: "%lld:%02lld:%02lld.%02lld", ms / 3600000, ms / 60000 % 60, ms / 1000 % 60, ms / 10 % 100) }
         let header = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,PingFang SC,64,&H00FFFFFF,&H00FFFFFF,&H00111111,&H66000000,0,0,1,3,1,2,80,80,180,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-        let events = cues.map { cue in "Dialogue: 0,\(time(cue.start)),\(time(cue.end)),Default,,0,0,0,,\(cue.text.replacingOccurrences(of: "\n", with: "\\N"))" }
+        let events = cues.map { cue in "Dialogue: 0,\(time(cue.start)),\(time(cue.end)),Default,,0,0,0,,\(assText(cue.text))" }
         return header + "\n" + events.joined(separator: "\n") + "\n"
+    }
+    /// Subtitle text as literal ASS text: braces start override tags and backslashes start escapes,
+    /// so they are replaced with full-width forms; line breaks become \N.
+    static func assText(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\", with: "＼")
+            .replacingOccurrences(of: "{", with: "｛").replacingOccurrences(of: "}", with: "｝")
+            .replacingOccurrences(of: "\n", with: "\\N")
     }
 
     static func packageManifest(project: Project, duration: Double, template: ShortVideoTemplate) -> String {
@@ -123,10 +140,12 @@ extension Studio {
 
     func saveVersion(_ label: String) {
         guard !isWorking, storageAvailable, let p = project else { return }
+        flushPendingSave()
         var snapshot = p; snapshot.versions = nil
+        let trimmed = String(label.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
         do {
-            let version = ProjectVersion(label: String(label.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80)).isEmpty ? "自动保存版本" : String(label.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80)), payload: try JSONEncoder().encode(snapshot))
-            edit { p in p.versions = Array((p.versions ?? []) + [version]).suffix(30) }
+            let version = ProjectVersion(label: trimmed.isEmpty ? "自动保存版本" : trimmed, payload: try JSONEncoder().encode(snapshot))
+            try writeVersions(Array((try loadVersions(p.id) + [version]).suffix(30)), for: p.id)
             status = "已保存版本：\(version.label)"
         } catch { self.error = "版本保存失败：\(error.localizedDescription)" }
     }
@@ -135,7 +154,7 @@ extension Studio {
         guard !isWorking, let current = project else { return }
         do {
             var restored = try JSONDecoder().decode(Project.self, from: version.payload)
-            restored.id = current.id; restored.versions = current.versions
+            restored.id = current.id; restored.versions = nil
             edit { $0 = restored }
             status = "已恢复版本：\(version.label)，请重新检查生成范围。"
         } catch { self.error = "版本恢复失败：\(error.localizedDescription)" }
@@ -150,13 +169,14 @@ extension Studio {
             let urls = try currentURLs()
             let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.prompt = "选择文件夹"
             guard panel.runModal() == .OK, let directory = panel.url else { return }
-            let destination = directory.appendingPathComponent("KongVox-短视频-" + String(p.title.prefix(30)))
+            let destination = directory.appendingPathComponent("KongVox-短视频-" + BatchExport.safeName(String(p.title.prefix(30))))
             guard !FileManager.default.fileExists(atPath: destination.path) else { throw VoxError(message: "目标文件夹已存在，请换一个位置。") }
-            busy = true; status = "正在生成短视频交付包…"
+            busy = true; stop(); status = "正在生成短视频交付包…"
+            let folder = root
             task = Task {
                 defer { busy = false; task = nil }
                 do {
-                    try await Task.detached { try ShortVideoExport.write(p, urls: urls, root: self.root, to: destination) }.value
+                    try await Task.detached { try ShortVideoExport.write(p, urls: urls, root: folder, to: destination) }.value
                     status = "短视频交付包已生成"; NSWorkspace.shared.activateFileViewerSelecting([destination])
                 } catch { self.error = error.localizedDescription }
             }
@@ -165,18 +185,24 @@ extension Studio {
 }
 
 enum ShortVideoExport {
+    /// Builds the package in a hidden sibling folder and moves it into place only when every file is written.
     static func write(_ project: Project, urls: [URL], root: URL, to destination: URL) throws {
-        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
-        let audioURL = destination.appendingPathComponent("旁白.wav")
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: destination.path) else { throw VoxError(message: "目标文件夹已存在，请换一个位置。") }
+        let staging = destination.deletingLastPathComponent().appendingPathComponent(".kongvox-short-\(UUID())")
+        try fm.createDirectory(at: staging, withIntermediateDirectories: false)
+        defer { try? fm.removeItem(at: staging) }
+        let audioURL = staging.appendingPathComponent("旁白.wav")
         let frames = try AudioAssembly.render(urls: urls, gaps: project.gaps, normalize: project.levelsEnabled, to: audioURL, seam: project.resolvedSeam)
-        let duration = Double(CaptionTimeline.duration(frames: frames, gaps: project.gaps)) / 1000
-        let pcm = try AudioFiles.extractPCM(Data(contentsOf: audioURL))
+        let total = CaptionTimeline.duration(frames: frames, gaps: project.gaps)
+        let pcm: Data? = try project.needsAlignmentPCM ? AudioFiles.extractPCM(Data(contentsOf: audioURL)) : nil
         let cues = try project.captionCues(frames: frames, pcm: pcm)
-        try CaptionTimeline.render(cues, duration: CaptionTimeline.duration(frames: frames, gaps: project.gaps)).write(to: destination.appendingPathComponent("字幕.srt"), atomically: true, encoding: .utf8)
-        try Version011Tools.ass(cues: cues, duration: CaptionTimeline.duration(frames: frames, gaps: project.gaps), style: project.resolvedTemplate).write(to: destination.appendingPathComponent("字幕.ass"), atomically: true, encoding: .utf8)
-        try Version011Tools.packageManifest(project: project, duration: duration, template: project.resolvedTemplate).write(to: destination.appendingPathComponent("项目.json"), atomically: true, encoding: .utf8)
-        try "标题：\(project.resolvedTemplate.titleHint)\n项目：\(project.title)".write(to: destination.appendingPathComponent("标题页.txt"), atomically: true, encoding: .utf8)
-        try "感谢观看\n\(project.title)".write(to: destination.appendingPathComponent("结尾页.txt"), atomically: true, encoding: .utf8)
-        try "KongVox 短视频交付包\n模板：\(project.resolvedTemplate.rawValue)\n旁白：旁白.wav\n字幕：字幕.srt / 字幕.ass\n字幕时间：\(project.resolvedAlignment.rawValue)\n".write(to: destination.appendingPathComponent("交付清单.txt"), atomically: true, encoding: .utf8)
+        try CaptionTimeline.render(cues, duration: total).write(to: staging.appendingPathComponent("字幕.srt"), atomically: true, encoding: .utf8)
+        try Version011Tools.ass(cues: cues, duration: total, style: project.resolvedTemplate).write(to: staging.appendingPathComponent("字幕.ass"), atomically: true, encoding: .utf8)
+        try Version011Tools.packageManifest(project: project, duration: Double(total) / 1000, template: project.resolvedTemplate).write(to: staging.appendingPathComponent("项目.json"), atomically: true, encoding: .utf8)
+        try "标题：\(project.resolvedTemplate.titleHint)\n项目：\(project.title)".write(to: staging.appendingPathComponent("标题页.txt"), atomically: true, encoding: .utf8)
+        try "感谢观看\n\(project.title)".write(to: staging.appendingPathComponent("结尾页.txt"), atomically: true, encoding: .utf8)
+        try "KongVox 短视频交付包\n模板：\(project.resolvedTemplate.rawValue)\n旁白：旁白.wav\n字幕：字幕.srt / 字幕.ass\n字幕时间：\(project.resolvedAlignment.rawValue)\n".write(to: staging.appendingPathComponent("交付清单.txt"), atomically: true, encoding: .utf8)
+        try fm.moveItem(at: staging, to: destination)
     }
 }

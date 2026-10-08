@@ -125,13 +125,14 @@ struct CaptionEditor: View {
         do {
             let urls = try studio.currentURLs(), url = studio.root.appendingPathComponent("caption-preview.wav")
             studio.stop(); studio.busy = true; defer { studio.busy = false }
-            let frames = try await Task.detached { try AudioAssembly.render(urls: urls, gaps: p.gaps, normalize: p.levelsEnabled, to: url) }.value
+            let frames = try await Task.detached { try AudioAssembly.render(urls: urls, gaps: p.gaps, normalize: p.levelsEnabled, to: url, seam: p.resolvedSeam) }.value
             state.duration = CaptionTimeline.duration(frames: frames, gaps: p.gaps)
-            let pcm = try AudioFiles.extractPCM(Data(contentsOf: url))
-            state.generated = try p.captionCues(frames: frames, pcm: pcm)
+            let pcm: Data? = try p.resolvedAlignment == .localPauses ? AudioFiles.extractPCM(Data(contentsOf: url)) : nil
+            // Automatic captions never depend on saved manual captions, so stale edits can always be replaced here.
+            state.generated = try p.autoCaptionCues(frames: frames, pcm: pcm)
             state.signature = p.captionSignature; state.preview = url
-            if p.captionsStale { state.cues = state.generated; state.message = "旧字幕对应的音频或设置已改变。已重新生成草稿，请核对后保存，原字幕暂时保留。" }
-            else { state.cues = try p.captionCues(frames: frames); state.message = "可修改文字、时间、拆条或合并，循环试听核对后保存。" }
+            if p.captionsStale { state.cues = state.generated; state.message = "旧字幕对应的音频或设置已改变。已按当前音频重新生成草稿，请核对后保存；也可在交付检查中清除手工字幕。" }
+            else { state.cues = try p.captionCues(frames: frames, pcm: pcm); state.message = "可修改文字、时间、拆条或合并，循环试听核对后保存。" }
             state.initial = state.cues
             if let first = state.cues.first { select(first) }; state.loaded = true
         } catch { state.message = error.localizedDescription }

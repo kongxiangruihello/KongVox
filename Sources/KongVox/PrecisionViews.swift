@@ -15,6 +15,7 @@ final class PrecisionViewState: ObservableObject {
     @Published var selected = Set<UUID>()
     @Published var sample = "你好，欢迎收听今天的分享。让我们用自然的声音，把一个完整的故事讲清楚。"
     @Published var confirmCompare = false
+    @Published var confirmClearCaptions = false
 }
 struct PrecisionWorkbench: View {
     @EnvironmentObject var studio: Studio
@@ -44,6 +45,9 @@ struct PrecisionWorkbench: View {
         .confirmationDialog("将当前文稿改为按句精修？", isPresented: $state.confirmSplit) {
             Button("开启按句精修") { studio.enableSentenceEditing() }
         } message: { Text("会调整处理范围，无法直接拆用旧的整段音频；已生成的多句段落可能需要重新计费生成。历史音频保留。已有读法、语速或停顿精修时，请先备份并清除精修。") }
+        .confirmationDialog("清除已保存的手工字幕？", isPresented: $state.confirmClearCaptions) {
+            Button("清除并改用自动字幕", role: .destructive) { studio.clearCaptionEdits() }
+        } message: { Text("音频和文稿不受影响。清除后无法撤销，除非恢复之前保存的项目版本。") }
         .confirmationDialog("生成所选音色的对比试听？", isPresented: $state.confirmCompare) {
             Button("确认生成对比") { studio.compareFavorites(ids: state.selected, text: state.sample) }
         } message: { Text("向所列服务发送相同文稿，每个未缓存音色最多 \(state.sample.count) 字，共 \(state.selected.count) 个音色，按各服务实际计费。失败不自动重试。") }
@@ -68,7 +72,7 @@ struct PrecisionWorkbench: View {
                             Text("\(index + 1)").monospacedDigit().foregroundStyle(.secondary)
                             VStack(alignment: .leading) {
                                 Text(segment.text).lineLimit(3)
-                                Text("\(p.settings.reading(segment.spokenText).count) 字 · \(studio.ready(segment, settings: p.settings) ? "复用已有音频" : "需要生成")" + (segment.speedOverride.map { " · \(String(format: "%.2f", $0))×" } ?? "") + (segment.pauseOverride.map { " · 停顿 \(String(format: "%.2f", $0)) 秒" } ?? "")).font(.caption).foregroundStyle(.secondary)
+                                Text("\(p.settings.reading(segment.spokenText).count) 字 · \(studio.ready(segment, in: p) ? "复用已有音频" : "需要生成")" + (segment.speedOverride.map { " · \(String(format: "%.2f", $0))×" } ?? "") + (segment.pauseOverride.map { " · 停顿 \(String(format: "%.2f", $0)) 秒" } ?? "")).font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
                             VStack(alignment: .trailing, spacing: 6) {
@@ -95,9 +99,14 @@ struct PrecisionWorkbench: View {
                 Picker("时间对齐", selection: Binding(get: { p.resolvedAlignment }, set: { value in studio.edit { $0.subtitleAlignment = value } })) {
                     ForEach(SubtitleAlignmentMode.allCases) { Text($0.rawValue).tag($0) }
                 }.disabled(studio.isWorking)
-                if p.resolvedAlignment == .localPauses { Text("本地分析音频能量，在句子边界附近寻找停顿；音频不上传，也不是逐字语音识别。") .font(.caption2).foregroundStyle(.secondary) }
+                if p.resolvedAlignment == .localPauses { Text("本地分析音频能量，只在同一片段内的分句边界前后 0.4 秒寻找明显停顿；片段之间的边界和停顿保持不变，段落字幕不受影响。音频不上传，也不是逐字语音识别。") .font(.caption2).foregroundStyle(.secondary) }
                 Button("打开字幕编辑器…") { state.showCaptions = true }.disabled(studio.isWorking || !studio.fullAudioReady)
-                if p.captionEdits != nil { Text(p.captionsStale ? "手工字幕已过期，请重新加载并核对。" : "已保存手工字幕，导出优先使用手工版本。改变样式后需重新核对。").font(.caption).foregroundStyle(.orange) }
+                if p.captionEdits != nil {
+                    HStack {
+                        Text(p.captionsStale ? "手工字幕已过期：可在字幕编辑器中按当前音频重新核对保存，或清除后改用自动字幕。" : "已保存手工字幕，导出优先使用手工版本。改变样式后需重新核对。").font(.caption).foregroundStyle(.orange)
+                        Button("清除手工字幕…") { state.confirmClearCaptions = true }.font(.caption).disabled(studio.isWorking)
+                    }
+                }
                 Text("设置同时用于单独 SRT、音频字幕 ZIP 和批量导出。字幕保留原稿，替代读法不会写进字幕。").font(.caption)
                 Text("每个已合成片段的起止时间来自真实音频；同片段内的分句和竖屏拆条按字数分配时间，未使用语音识别。需要在剪辑软件中复核精确入点。").font(.caption).foregroundStyle(.orange)
                 let sample = p.segments.first?.text ?? "这是一段字幕示例。可以选择分句，或使用适合竖屏的视频断行。"
@@ -146,7 +155,8 @@ struct PrecisionWorkbench: View {
                 if let p = studio.project {
                     Text("接缝与短视频").font(.headline)
                     Toggle("启用接缝淡化", isOn: Binding(get: { p.resolvedSeam.enabled }, set: { enabled in studio.edit { $0.seamOptions = enabled ? (p.seamOptions ?? SeamOptions(crossfadeMilliseconds: 40, gainAdjustment: 0, loopSeamPreview: true)) : SeamOptions() } })).toggleStyle(.checkbox)
-                    HStack { Text("淡化毫秒"); Slider(value: Binding(get: { Double(p.resolvedSeam.crossfadeMilliseconds) }, set: { value in studio.edit { $0.seamOptions = SeamOptions(crossfadeMilliseconds: Int(value.rounded()), gainAdjustment: p.resolvedSeam.gainAdjustment, loopSeamPreview: p.resolvedSeam.loopSeamPreview) } }), in: 0...120, step: 5); Text("\(p.resolvedSeam.crossfadeMilliseconds) ms").monospacedDigit() }.disabled(!p.resolvedSeam.enabled)
+                    HStack { Text("淡化毫秒"); Slider(value: Binding(get: { Double(p.resolvedSeam.crossfadeMilliseconds) }, set: { value in studio.editLive { $0.seamOptions = SeamOptions(crossfadeMilliseconds: Int(value.rounded()), gainAdjustment: p.resolvedSeam.gainAdjustment, loopSeamPreview: p.resolvedSeam.loopSeamPreview) } }), in: 0...120, step: 5); Text("\(p.resolvedSeam.crossfadeMilliseconds) ms").monospacedDigit() }.disabled(!p.resolvedSeam.enabled)
+                    Text("只作用于没有停顿的接缝：前段淡出、后段淡入，两段不重叠混合。「试听接缝」与导出使用同一处理。").font(.caption2).foregroundStyle(.secondary)
                     Picker("短视频模板", selection: Binding(get: { p.resolvedTemplate }, set: { value in studio.edit { $0.shortVideoTemplate = value } })) { ForEach(ShortVideoTemplate.allCases) { Text($0.rawValue).tag($0) } }
                 }
                 Text("服务配置").font(.headline)

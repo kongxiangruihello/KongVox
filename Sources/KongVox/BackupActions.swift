@@ -9,7 +9,11 @@ extension Studio {
         backupProject(to: url)
     }
     func backupProject(to destination: URL) {
-        guard !isWorking, storageAvailable, let p = project else { return }
+        guard !isWorking, storageAvailable, var current = project else { return }
+        // Version snapshots live under Versions/; carry them inside the backup as before.
+        let saved = versions(for: current.id)
+        current.versions = saved.isEmpty ? nil : saved
+        let p = current
         busy = true; stop(); status = "正在备份文稿、词典和历史音频…"
         let folder = root
         task = Task {
@@ -35,13 +39,15 @@ extension Studio {
             defer { try? FileManager.default.removeItem(at: staging); busy = false; task = nil }
             var copied: [URL] = []
             do {
-                let restored = try await Task.detached { try ProjectBackup.read(source, staging: staging) }.value
+                var restored = try await Task.detached { try ProjectBackup.read(source, staging: staging) }.value
                 for name in ProjectBackup.fileNames(restored) {
                     let target = root.appendingPathComponent("Audio").appendingPathComponent(name)
                     try FileManager.default.moveItem(at: staging.appendingPathComponent(name), to: target); copied.append(target)
                 }
+                if let inline = restored.versions, !inline.isEmpty { try writeVersions(inline, for: restored.id) }
+                restored.versions = nil
                 projects.insert(restored, at: 0)
-                guard save() else { projects.removeAll { $0.id == restored.id }; throw VoxError(message: "恢复项目保存失败。") }
+                guard save() else { projects.removeAll { $0.id == restored.id }; try? writeVersions([], for: restored.id); throw VoxError(message: "恢复项目保存失败。") }
                 selected = restored.id; findings = []; qualitySummary = "恢复后请重新检查"
                 status = "已恢复为新项目，词典保留备份快照；继续生成前请核对服务配置。"
             } catch {

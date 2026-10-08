@@ -6,6 +6,7 @@ func XCTAssertFalse(_ value: Bool) { precondition(!value) }
 func XCTAssertEqual<T: Equatable>(_ a: T, _ b: T) { precondition(a == b, "\(a) != \(b)") }
 func XCTAssertGreaterThan<T: Comparable>(_ a: T, _ b: T) { precondition(a > b) }
 func XCTAssertNotNil<T>(_ value: T?) { precondition(value != nil) }
+func XCTAssertNil<T>(_ value: T?) { precondition(value == nil) }
 func XCTFail(_ message: String) { fatalError(message) }
 func XCTAssertThrowsError<T>(_ expression: @autoclosure () throws -> T) { do { _ = try expression(); fatalError("Expected error") } catch {} }
 #else
@@ -282,8 +283,16 @@ final class SpeechTests: XCTestCase {
         try v011.testVersionRoundTripAndBudget()
         try v011.testLocalPauseCuesAndASS()
         try v011.testSeamRenderAndShortVideoPackage()
+        let review = ReviewFixTests()
+        try review.testStaleManualCaptionsCanBeReplacedOrCleared()
+        try review.testLocalPausesSearchNearEstimate()
+        try review.testReadinessIncludesContextEverywhere()
+        try review.testVersionsMigrateAndLiveEditsFlush()
+        try review.testCleanupKeepsReferencedAudioAndDeleteProject()
+        try review.testSeamPreviewMatchesExportTreatment()
+        try review.testExportTextAndImportDetails()
        print("PASS: 65 test groups; local split/context restore, seam audio, selected generation impact, caption edits/persistence/exports/backup, dictionary preview and delivery checks; sentence reuse, per-sentence speed/pause, subtitle splitting, preflight, voice cache and completeness; Volcengine SSE, document import, presets, multi-project queue, batch delivery; timeline/highlighting, audition/adoption, backup isolation/corruption, 10k/30k text stress; anchored edits, chapters, dictionary precedence/persistence/invalidation, graceful pause/restart, chapter scope/redo and quality findings; natural joins, level matching, ZIP/SRT shared timeline, opening reuse, usage estimates and seek; long document preservation/reuse/resume/full export; observed CosyVoice header and Qwen models/migration; persistent download recovery, safe diagnostics, SRT timing; WAV streaming headers and normalization; CosyVoice request/download/errors/catalog migration; legacy migration, Gemini requests/decoding/queue, custom profiles, credential isolation, WAV/M4A, persistence and recovery")
-        print("PASS: 69 test groups; includes the 4 focused 0.11 context, version, caption, seam and short-video delivery checks")
+        print("PASS: 76 test groups; includes the 4 focused 0.11 checks and 7 review-fix checks (stale captions, pause alignment, readiness, version storage, cleanup, seams, export text)")
     }
 }
 #endif

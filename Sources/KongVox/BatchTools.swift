@@ -59,7 +59,7 @@ extension Studio {
     }
     func queueCharacters(_ p: Project) -> Int {
         var prepared = p; if prepared.isLongMode { prepared.prepareLongDocument() }
-        return prepared.segments.filter { !ready($0, settings: prepared.settings) }.reduce(0) { $0 + prepared.settings.reading($1.spokenText).count }
+        return prepared.segments.filter { !ready($0, in: prepared) }.reduce(0) { $0 + prepared.settings.reading($1.spokenText).count }
     }
     func pauseQueue() {
         queueStop = true
@@ -134,7 +134,7 @@ enum BatchExport {
         var manifest = ["KongVox 配音交付清单", "格式：WAV · 24 kHz · 单声道 · 16-bit PCM；SRT 按各项目字幕设置导出", ""]
         for (projectIndex, p) in projects.enumerated() {
             guard !p.segments.isEmpty, !p.needsLongPreparation || !p.isLongMode,
-                  p.segments.allSatisfy({ $0.ready(p.settings) && $0.current != nil }) else { throw VoxError(message: "「\(p.title)」尚有未生成或待更新的音频。") }
+                  p.segments.allSatisfy({ p.isReady($0, root: root) }) else { throw VoxError(message: "「\(p.title)」尚有未生成或待更新的音频。") }
             if chapters && p.captionEdits != nil { throw VoxError(message: "「\(p.title)」有手工字幕，请按整篇导出以保留自定义时间轴；分章导出暂不拆用手工字幕。") }
             let groups: [(String, [Int])] = chapters ? p.chapters.map { chapter in (chapter.title, p.segments.indices.filter { chapter.segmentIDs.contains(p.segments[$0].id) }) } : [(p.title, Array(p.segments.indices))]
             for (chapterIndex, group) in groups.enumerated() {
@@ -142,8 +142,21 @@ enum BatchExport {
                 let name = String(format: "%02d-%02d-", projectIndex + 1, chapterIndex + 1) + safeName(p.title) + (chapters ? "-" + safeName(group.0) : "")
                 let urls = group.1.map { root.appendingPathComponent("Audio").appendingPathComponent(p.segments[$0].current!.file) }
                 let gaps = group.1.map { p.gaps[$0] }
-                let frames = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: p.levelsEnabled, to: staging.appendingPathComponent(name + ".wav"), seam: p.resolvedSeam)
-                let subtitle = try chapters ? Subtitles.render(texts: group.1.map { p.segments[$0].text }, frames: frames, gaps: gaps, style: p.resolvedSubtitleStyle) : p.captionContent(frames: frames)
+                let audio = staging.appendingPathComponent(name + ".wav")
+                let frames = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: p.levelsEnabled, to: audio, seam: p.resolvedSeam)
+                let subtitle: String
+                if !chapters {
+                    subtitle = try p.captionContent(frames: frames, renderedAudio: audio)
+                } else {
+                    let texts = group.1.map { p.segments[$0].text }
+                    let cues: [CaptionCue]
+                    if p.resolvedAlignment == .localPauses {
+                        cues = try Version011Tools.localPauseCues(texts: texts, frames: frames, gaps: gaps, style: p.resolvedSubtitleStyle, pcm: AudioFiles.extractPCM(Data(contentsOf: audio)))
+                    } else {
+                        cues = try Subtitles.cues(texts: texts, frames: frames, gaps: gaps, style: p.resolvedSubtitleStyle)
+                    }
+                    subtitle = try CaptionTimeline.render(cues, duration: CaptionTimeline.duration(frames: frames, gaps: gaps))
+                }
                 try subtitle.write(to: staging.appendingPathComponent(name + ".srt"), atomically: true, encoding: .utf8)
                 let duration = Double(frames.reduce(0,+)) / 24000 + gaps.dropLast().reduce(0,+)
                 manifest.append("\(name)\n时长：\(String(format: "%.2f", duration)) 秒\n文件：\(name).wav / \(name).srt\n")
