@@ -1,0 +1,46 @@
+name: ASR probe
+on:
+  push:
+    branches: ['explore/**']
+    paths: ['tools/asr-probe/**', '.github/workflows/asr-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        working-directory: tools/asr-probe
+        run: |
+          set -o pipefail
+          sw_vers; swift --version
+          swift build -c release 2>&1 | tee build.log
+      - name: Report build errors
+        if: failure()
+        working-directory: tools/asr-probe
+        run: grep -E "error:" build.log | head -30 | while IFS= read -r l; do echo "::error::${l//%/%25}"; done || true
+      - name: Self-test with synthesized Mandarin speech
+        working-directory: tools/asr-probe
+        continue-on-error: true
+        run: |
+          BIN="$(swift build -c release --show-bin-path)/asr-probe"
+          "$BIN" locales 2>&1 | while IFS= read -r l; do echo "::notice::${l:0:900}"; done
+          VOICE="$(say -v '?' | awk '/zh_CN/ {print $1; exit}')"
+          echo "::notice::zh_CN voice: ${VOICE:-none}"
+          [ -n "$VOICE" ] || exit 0
+          say -v "$VOICE" -o s1.aiff "今天我们讨论明清之际的思想变化。顾炎武主张经世致用，反对空谈心性。"
+          afconvert -f WAVE -d LEI16@24000 -c 1 s1.aiff s1.wav
+          printf 's1\t%s/s1.wav\n' "$PWD" > m.tsv
+          "$BIN" transcribe m.tsv out.jsonl zh-CN 2>&1 | while IFS= read -r l; do echo "::notice::$l"; done
+          cut -c1-900 out.jsonl | while IFS= read -r l; do echo "::notice::${l//%/%25}"; done
+      - name: Package
+        working-directory: tools/asr-probe
+        run: |
+          mkdir -p dist && cp "$(swift build -c release --show-bin-path)/asr-probe" dist/
+          codesign --force --sign - dist/asr-probe && file dist/asr-probe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asr-probe
+          path: tools/asr-probe/dist/asr-probe
