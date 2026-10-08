@@ -38,7 +38,7 @@ jobs:
       - name: Package
         working-directory: tools/asr-probe
         run: |
-          mkdir -p dist && cp "$(swift build -c release --show-bin-path)/asr-probe" dist/
+          mkdir -p dist && otool -s __TEXT __info_plist "$(swift build -c release --show-bin-path)/asr-probe" | head -3 && cp "$(swift build -c release --show-bin-path)/asr-probe" dist/
           codesign --force --sign - dist/asr-probe && file dist/asr-probe
       - uses: actions/upload-artifact@v4
         with:

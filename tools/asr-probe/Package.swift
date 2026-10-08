@@ -5,5 +5,7 @@ import PackageDescription
 let package = Package(
     name: "asr-probe",
     platforms: [.macOS("26.0")],
-    targets: [.executableTarget(name: "asr-probe", swiftSettings: [.swiftLanguageMode(.v5)])]
+    targets: [.executableTarget(name: "asr-probe", swiftSettings: [.swiftLanguageMode(.v5)],
+        // A bundle identifier lets the system track this tool's speech-model reservation.
+        linkerSettings: [.unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", "Info.plist"])])]
 )

@@ -70,6 +70,10 @@ func transcribe(_ url: URL, locale: Locale) async throws -> (String, [Run], Doub
         }
         log("using locale \(locale.identifier)")
         do {
+            let reserved = await AssetInventory.reservedLocales.map(\.identifier)
+            log("reserved locales: \(reserved) (max \(AssetInventory.maximumReservedLocales))")
+            if !reserved.contains(locale.identifier) { log("reserve \(locale.identifier): \(try await AssetInventory.reserve(locale: locale))") }
+            log("asset status: \(await AssetInventory.status(forModules: [transcriber(locale)]))")
             if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber(locale)]) {
                 log("downloading speech model…")
                 try await request.downloadAndInstall()
