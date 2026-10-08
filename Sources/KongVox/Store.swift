@@ -17,6 +17,7 @@ import UniformTypeIdentifiers
     @Published var voiceFavorites: [VoiceFavorite] = []
     @Published var presets: [VoicePreset] = []
     @Published var queue: [QueueEntry] = []
+    @Published var batchBudget = BatchBudget()
     @Published var queueRunning = false
     var queueTask: Task<Void, Never>?
     var queueStop = false
@@ -39,6 +40,8 @@ import UniformTypeIdentifiers
     var task: Task<Void, Never>?
     var player: AVAudioPlayer?
     private var playbackTimer: Timer?
+    var playbackRange: ClosedRange<Double>?
+    var repeatRange = false
     var storageAvailable = true
     let client: SpeechClient
     let keyProvider: (ServiceProfile) throws -> String
@@ -81,6 +84,8 @@ import UniformTypeIdentifiers
                     else { queue = try JSONDecoder().decode([QueueEntry].self, from: Data(contentsOf: extra)) }
                 }
             }
+            let budgetFile = self.root.appendingPathComponent("batch-budget.json")
+            if FileManager.default.fileExists(atPath: budgetFile.path) { batchBudget = try JSONDecoder().decode(BatchBudget.self, from: Data(contentsOf: budgetFile)) }
             for i in queue.indices where queue[i].state == "生成中" { queue[i].state = "已暂停" }
             let file = self.root.appendingPathComponent("projects.json")
             if FileManager.default.fileExists(atPath: file.path) {
@@ -186,7 +191,14 @@ import UniformTypeIdentifiers
     }
     func audioURL(_ take: Take) -> URL { root.appendingPathComponent("Audio").appendingPathComponent(take.file) }
     func ready(_ segment: Segment, settings: VoiceSettings) -> Bool {
-        segment.ready(settings) && segment.current.map { FileManager.default.fileExists(atPath: audioURL($0).path) } == true
+        guard segment.ready(settings), segment.current.map({ FileManager.default.fileExists(atPath: audioURL($0).path) }) == true else { return false }
+        if settings.contextHintEnabled == true, let p = project { return segment.contextFingerprint == p.contextFingerprint(for: segment.id) }
+        return true
+    }
+    func saveBatchBudget() {
+        guard storageAvailable else { return }
+        do { try JSONEncoder().encode(batchBudget).write(to: root.appendingPathComponent("batch-budget.json"), options: .atomic) }
+        catch { self.error = "无法保存批量预算设置。" }
     }
     func recoveryFile(_ segment: Segment, project: Project) -> URL {
         root.appendingPathComponent("Recovery").appendingPathComponent("\(project.id)-\(segment.id)-\(segment.fingerprint(project.settings)).json")
@@ -255,7 +267,8 @@ import UniformTypeIdentifiers
             error = "发音替换后的片段超过服务长度限制，请缩短替代读法或在段落精调中拆分。"; return
         }
         guard !pending.isEmpty else { status = "全文已就绪，可以试听或导出完整音频。"; return }
-        let issues = ServicePreflight.inspect(snapshot, catalog: catalog).filter(\.blocking)
+        var scopedSnapshot = snapshot; scopedSnapshot.segments = pending
+        let issues = ServicePreflight.inspect(scopedSnapshot, catalog: catalog).filter(\.blocking)
         guard issues.isEmpty else { error = issues.map(\.message).joined(separator: "\n"); return }
         let service = snapshot.settings.resolvedService
         guard let saved = catalog.profiles.first(where: { $0.id == service.id }), saved.enabled else { error = "该服务已停用，请在声音工作台切换或在服务设置中启用。"; return }
@@ -273,7 +286,7 @@ import UniformTypeIdentifiers
                 if !fresh.isEmpty {
                     generationKey = try keyProvider(service)
                     for segment in fresh {
-                        _ = try client.request(text: snapshot.settings.reading(segment.spokenText), settings: segment.effectiveSettings(snapshot.settings), key: generationKey ?? "")
+                        _ = try client.request(text: snapshot.settings.reading(segment.spokenText), settings: segment.effectiveSettings(snapshot.settings), key: generationKey ?? "", context: snapshot.context(for: segment.id))
                     }
                 }
             } catch {
@@ -291,12 +304,13 @@ import UniformTypeIdentifiers
                         : "\(resume ? "正在恢复下载" : "正在生成") \(offset + 1) / \(pending.count) 段…"
                     if !resume && generationKey == nil { generationKey = try keyProvider(service) }
                     let key = resume ? "" : generationKey ?? ""
-                    let pcm = try await client.generate(text: snapshot.settings.reading(segment.spokenText), settings: segment.effectiveSettings(snapshot.settings), key: key, recoveryFile: recovery)
+                    let pcm = try await client.generate(text: snapshot.settings.reading(segment.spokenText), settings: segment.effectiveSettings(snapshot.settings), key: key, recoveryFile: recovery, context: snapshot.context(for: segment.id))
                     try Task.checkCancellation()
                     let take = Take(file: "\(UUID().uuidString).wav", fingerprint: segment.fingerprint(snapshot.settings), service: service, settings: segment.effectiveSettings(snapshot.settings), spokenText: snapshot.settings.reading(segment.spokenText))
                     try AudioFiles.writePCM(pcm, to: audioURL(take))
                     guard let pi = projects.firstIndex(where: { $0.id == snapshot.id }), let si = projects[pi].segments.firstIndex(where: { $0.id == segment.id }) else { return }
                     projects[pi].segments[si].takes.insert(take, at: 0)
+                    projects[pi].segments[si].contextFingerprint = snapshot.contextFingerprint(for: segment.id)
                     if !audition { projects[pi].segments[si].selectedTake = take.id }
                     auditionTake = take
                     guard save() else { status = "保存失败，已停止后续生成。"; setTaskState(snapshot.id, "保存失败", status); return }
@@ -368,7 +382,7 @@ import UniformTypeIdentifiers
         guard !(p.isLongMode && p.needsLongPreparation) else { error = "请先更新处理片段。"; return }
         let indices = p.segments.indices.filter { chapter.segmentIDs.contains(p.segments[$0].id) }
         guard !indices.isEmpty, indices.allSatisfy({ ready(p.segments[$0], settings: p.settings) }) else { error = "本章尚有未更新的音频，请先生成本章。"; return }
-        let urls = indices.map { audioURL(p.segments[$0].current!) }, gaps = indices.map { p.gaps[$0] }
+        let urls = indices.map { audioURL(p.segments[$0].current!) }, gaps = indices.map { p.gaps[$0] }, seam = p.resolvedSeam
         var destination = root.appendingPathComponent("chapter-preview.wav")
         if export {
             let panel = NSSavePanel(); panel.allowedContentTypes = [.wav]
@@ -380,7 +394,7 @@ import UniformTypeIdentifiers
         task = Task {
             defer { busy = false; task = nil }
             do {
-                try await Task.detached { _ = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: p.levelsEnabled, to: output) }.value
+                try await Task.detached { _ = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: p.levelsEnabled, to: output, seam: seam) }.value
                 if export { status = "本章已导出"; NSWorkspace.shared.activateFileViewerSelecting([output]) }
                 else { play(output); status = "正在试听：\(chapter.title)" }
             } catch { self.error = error.localizedDescription }
@@ -401,10 +415,10 @@ import UniformTypeIdentifiers
         status = "已采用所选版本，请重新检查成品。"
     }
     func cancel() { task?.cancel() }
-    func stop() { playbackCues = []; readingSegment = nil; playbackProject = nil; player?.stop(); player = nil; playing = false; playbackTime = 0; playbackDuration = 0; playbackTimer?.invalidate(); playbackTimer = nil }
+    func stop() { playbackRange = nil; repeatRange = false; playbackCues = []; readingSegment = nil; playbackProject = nil; player?.stop(); player = nil; playing = false; playbackTime = 0; playbackDuration = 0; playbackTimer?.invalidate(); playbackTimer = nil }
     func togglePause() {
         guard let player else { return }
-        if player.isPlaying { player.pause(); playing = false } else { if player.currentTime >= player.duration { player.currentTime = 0 }; playing = player.play() }
+        if player.isPlaying { player.pause(); playing = false } else { if let range = playbackRange, player.currentTime >= range.upperBound { player.currentTime = range.lowerBound } else if player.currentTime >= player.duration { player.currentTime = 0 }; playing = player.play() }
     }
     func play(_ url: URL, cues: [PlaybackCue] = [], projectID: UUID? = nil) {
         stop()
@@ -413,10 +427,15 @@ import UniformTypeIdentifiers
             guard player?.play() == true else { throw VoxError(message: "无法播放音频。") }
             playbackCues = cues; playbackProject = projectID; readingSegment = PlaybackTimeline.current(0, cues: cues)
             playing = true; playbackDuration = player?.duration ?? 0
-            playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     guard let self else { return }
                     if let player = self.player {
+                        if let range = self.playbackRange, self.playing, (!player.isPlaying || player.currentTime >= range.upperBound) {
+                            if self.repeatRange { player.currentTime = range.lowerBound; self.playing = player.play(); self.playbackTime = range.lowerBound }
+                            else { player.pause(); player.currentTime = range.upperBound; self.playing = false; self.playbackTime = range.upperBound }
+                            return
+                        }
                         if player.isPlaying { self.playbackTime = player.currentTime }
                         else if self.playing { self.playing = false; self.playbackTime = player.duration }
                         self.readingSegment = PlaybackTimeline.current(self.playbackTime, cues: self.playbackCues)
@@ -453,7 +472,7 @@ import UniformTypeIdentifiers
                 defer { busy = false; task = nil }
                 do {
                     let preview = root.appendingPathComponent("preview.wav")
-                    let frames = try await Task.detached { try AudioAssembly.render(urls: urls, gaps: gaps, normalize: normalize, to: preview) }.value
+                    let frames = try await Task.detached { try AudioAssembly.render(urls: urls, gaps: gaps, normalize: normalize, to: preview, seam: snapshot.resolvedSeam) }.value
                     let cues = try PlaybackTimeline.make(ids: snapshot.segments.map(\.id), frames: frames, gaps: gaps)
                     play(preview, cues: cues, projectID: snapshot.id)
                     if let segmentID, let cue = cues.first(where: { $0.id == segmentID }) { seek(cue.start) }
@@ -478,8 +497,8 @@ import UniformTypeIdentifiers
                 defer { busy = false; task = nil }
                 do {
                     try await Task.detached {
-                        let frames = try AudioAssembly.render(urls: urls, gaps: p.gaps, normalize: p.levelsEnabled)
-                        let content = try Subtitles.render(texts: p.segments.map(\.text), frames: frames, gaps: p.gaps, style: p.resolvedSubtitleStyle)
+                        let frames = try AudioAssembly.render(urls: urls, gaps: p.gaps, normalize: p.levelsEnabled, seam: p.resolvedSeam)
+                        let content = try p.captionContent(frames: frames)
                         try content.write(to: destination, atomically: true, encoding: .utf8)
                     }.value
                     status = "已导出段落字幕：\(destination.lastPathComponent)"
@@ -499,7 +518,7 @@ import UniformTypeIdentifiers
             task = Task {
                 defer { busy = false; task = nil }
                 do {
-                    try await Task.detached { try ExportBundle.write(urls: urls, texts: p.segments.map(\.text), gaps: p.gaps, normalize: p.levelsEnabled, destination: destination, subtitleStyle: p.resolvedSubtitleStyle) }.value
+                    try await Task.detached { try ExportBundle.write(urls: urls, texts: p.segments.map(\.text), gaps: p.gaps, normalize: p.levelsEnabled, destination: destination, subtitleStyle: p.resolvedSubtitleStyle, captionProject: p, seam: p.resolvedSeam) }.value
                     status = "已导出同一版本的配音.wav 与配音.srt。"
                     NSWorkspace.shared.activateFileViewerSelecting([destination])
                 } catch { self.error = error.localizedDescription; status = "组合包导出失败，原文件未修改。" }
@@ -514,7 +533,7 @@ import UniformTypeIdentifiers
             panel.allowedContentTypes = [format == "wav" ? .wav : format == "mp3" ? .mp3 : .mpeg4Audio]
             panel.nameFieldStringValue = (project?.title ?? "KongVox") + "." + format
             guard panel.runModal() == .OK, let destination = panel.url else { return }
-            let gaps = project!.gaps; let normalize = project!.levelsEnabled
+            let gaps = project!.gaps; let normalize = project!.levelsEnabled; let seam = project!.resolvedSeam
             busy = true; stop(); status = "正在导出…"
             task = Task {
                 defer { busy = false; task = nil }
@@ -523,7 +542,7 @@ import UniformTypeIdentifiers
                 do {
                     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                     let wav = folder.appendingPathComponent("mix.wav")
-                    try await Task.detached { _ = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: normalize, to: wav) }.value
+                    try await Task.detached { _ = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: normalize, to: wav, seam: seam) }.value
                     var result = wav
                     if format == "m4a" {
                         result = folder.appendingPathComponent("mix.m4a")

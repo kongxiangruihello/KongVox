@@ -12,6 +12,9 @@ import SwiftUI
 }
 final class ViewState: ObservableObject {
     @Published var showPrecision = false
+    @Published var showDelivery = false
+    @Published var showVersions = false
+    @Published var exportFormat = "zip"
     @Published var showBatch = false
     @Published var showFinishedReview = false
     @Published var showTools = false
@@ -40,6 +43,8 @@ struct StudioView: View {
                     }
                 }.listStyle(.sidebar).disabled(studio.isWorking)
                 Button { state.showSettings = true } label: { Label("服务设置", systemImage: "key") }.disabled(studio.isWorking)
+                Button("成品交付检查") { state.exportFormat = "zip"; state.showDelivery = true }.disabled(studio.isWorking)
+                Button("项目版本与回滚") { state.showVersions = true }.disabled(studio.isWorking)
                 Button("成品检查 / 对比") { state.showFinishedReview = true }
                 Menu("项目备份") {
                     Button("备份当前项目…") { studio.chooseBackup() }
@@ -49,7 +54,7 @@ struct StudioView: View {
                 Button("文稿导入 / 批量工作台") { state.showBatch = true }
                 Button("长文工作台 / 任务") { state.showTools = true }
                 Button("使用指南") { state.showWelcome = true }.font(.caption)
-                Text("KongVox 0.9 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
+                Text("KongVox 0.11.2 · AI 生成配音").font(.caption2).foregroundStyle(.tertiary)
             }.padding(18).navigationSplitViewColumnWidth(230)
         } detail: {
             VStack(spacing: 0) {
@@ -120,6 +125,8 @@ struct StudioView: View {
         }) {
             WelcomeView(configure: { state.configureAfterWelcome = true; finishWelcome() }, start: { finishWelcome() })
         }
+        .sheet(isPresented: $state.showDelivery) { DeliveryView(initialFormat: state.exportFormat).environmentObject(studio) }
+        .sheet(isPresented: $state.showVersions) { VersionHistoryView().environmentObject(studio) }
         .sheet(isPresented: $state.showPrecision) { PrecisionWorkbench().environmentObject(studio) }
         .sheet(isPresented: $state.showBatch) { BatchWorkbench().environmentObject(studio) }
         .sheet(isPresented: $state.showFinishedReview) { FinishedReview().environmentObject(studio) }
@@ -144,6 +151,14 @@ struct StudioView: View {
                 }
             }
             Text(p.settings.resolvedService.model).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            if p.settings.resolvedService.kind == .volcengine {
+                Text("资源 \(p.settings.resolvedService.model) · speaker \(p.settings.voice)")
+                    .font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                if p.settings.resolvedService.model != "seed-tts-2.0" && p.settings.voice == ServiceProfile.volcVVVoice {
+                    Text("当前资源与 VV 音色不匹配，请在服务设置中切换 2.0 或填写对应 speaker。")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
+            }
             if studio.catalog.profiles.first(where: { $0.id == p.settings.resolvedService.id }) != p.settings.resolvedService {
                 Button("应用最新服务配置") { studio.selectService(p.settings.resolvedService.id) }.font(.caption)
             }
@@ -204,13 +219,13 @@ struct StudioView: View {
                 if studio.activeSegment != nil { Button(studio.pauseRequested ? "等待暂停…" : "本段后暂停") { if studio.queueRunning { studio.pauseQueue() } else { studio.pauseAfterSegment() } }.disabled(studio.pauseRequested); Button("取消生成") { if studio.queueRunning { studio.pauseQueue() }; studio.cancel() } }
             } else {
                 Menu(p.isLongMode ? "导出完整音频" : "导出音频") {
-                    Button("音频 + 字幕组合包 · ZIP") { studio.exportBundle() }
+                    Button("音频 + 字幕组合包 · ZIP") { state.exportFormat = "zip"; state.showDelivery = true }
                     Divider()
-                    Button("SRT · 按字幕设置") { studio.exportSubtitles() }
+                    Button("SRT · 按字幕设置") { state.exportFormat = "srt"; state.showDelivery = true }
                     Divider()
-                    Button("WAV · 无损剪辑") { studio.export(format: "wav") }
-                    Button("M4A · 小体积") { studio.export(format: "m4a") }
-                    Button(Studio.ffmpeg == nil ? "MP3 · 需安装 FFmpeg" : "MP3 · 通用分享") { studio.export(format: "mp3") }.disabled(Studio.ffmpeg == nil)
+                    Button("WAV · 无损剪辑") { state.exportFormat = "wav"; state.showDelivery = true }
+                    Button("M4A · 小体积") { state.exportFormat = "m4a"; state.showDelivery = true }
+                    Button(Studio.ffmpeg == nil ? "MP3 · 需安装 FFmpeg" : "MP3 · 通用分享") { state.exportFormat = "mp3"; state.showDelivery = true }.disabled(Studio.ffmpeg == nil)
                 }.fixedSize().disabled(!studio.fullAudioReady)
                 Button("试听开头") { studio.generateOpening() }.disabled(p.isLongMode ? p.fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : p.segments.isEmpty)
             }
@@ -218,7 +233,7 @@ struct StudioView: View {
         }.padding(18)
     }
 }
-@MainActor final class SegmentControls: ObservableObject { @Published var discardCache = false; @Published var showRepair = false }
+@MainActor final class SegmentControls: ObservableObject { @Published var discardCache = false; @Published var showRepair = false; @Published var showGenerate = false }
 struct SegmentCard: View {
     @StateObject private var controls = SegmentControls()
     @EnvironmentObject var studio: Studio
@@ -246,7 +261,7 @@ struct SegmentCard: View {
             HStack {
                 if studio.hasRecovery(segment) { Button("放弃下载缓存") { controls.discardCache = true } }
                 Button("读音 / 停顿精调") { controls.showRepair = true }
-                Button(studio.hasRecovery(segment) ? "继续下载" : segment.current == nil ? "生成并试听" : "重新生成") { studio.generate(only: segment.id) }
+                Button(studio.hasRecovery(segment) ? "继续下载" : segment.current == nil ? "生成并试听" : "重新生成") { controls.showGenerate = true }
                 if let take = segment.current {
                     Button("试听此版本") { studio.play(studio.audioURL(take)) }
                     Menu("历史 · \(segment.takes.count) 版") {
@@ -259,7 +274,8 @@ struct SegmentCard: View {
                 }
                 Spacer()
             }.controlSize(.small)
-        }.sheet(isPresented: $controls.showRepair) { SegmentRepair(segmentID: segment.id).environmentObject(studio) }
+        }.sheet(isPresented: $controls.showGenerate) { GenerationReview(scope: [segment.id], initialForce: true).environmentObject(studio) }
+        .sheet(isPresented: $controls.showRepair) { SegmentRepair(segmentID: segment.id).environmentObject(studio) }
         .confirmationDialog("放弃已生成的下载结果？", isPresented: $controls.discardCache) {
             Button("放弃缓存", role: .destructive) { studio.discardRecovery(segment) }
         } message: { Text("之后点击生成将重新请求服务，可能再次计费。") }

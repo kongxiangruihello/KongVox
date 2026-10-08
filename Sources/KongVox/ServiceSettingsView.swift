@@ -155,11 +155,26 @@ struct ServiceSettings: View {
             TextField("https://…/v1 或 …/v1beta", text: $editor.profile.baseURL)
             Text(editor.profile.kind == .volcengine ? "资源 ID（选择模型及计费方式）" : "模型名称").font(.caption)
             TextField("TTS 模型 ID", text: $editor.profile.model)
-            Menu("选择模型预设") {
+            if editor.profile.kind == .volcengine {
+                Menu("选择火山资源预设") {
+                    ForEach(editor.profile.volcengineModelPresets) { preset in
+                        Button(preset.title) { applyVolcenginePreset(preset) }
+                    }
+                }.fixedSize()
+                Text(editor.profile.volcengineModelPresets.first(where: { $0.id == editor.profile.model })?.note ?? "自定义资源 ID：请确认它与 speaker ID 属于同一套音色资源。")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Menu("选择模型预设") {
                     ForEach(editor.profile.modelPresets, id: \.self) { model in Button(model) { editor.profile.model = model } }
                 }.fixedSize()
+            }
             if editor.profile.kind == .volcengine {
-                Text("使用豆包语音新版控制台的 API Key（不是火山云 AccessKey/SecretKey）。默认 seed-tts-2.0，声音为 VV。资源 ID 与声音 ID 必须匹配；切换 1.0 后需填写对应音色。本版使用新版 Key 鉴权，不支持旧 AppID + Token。").font(.caption).foregroundStyle(.secondary)
+                Text("新版使用豆包语音 API Key，AppID 留空；旧版填写 AppID，并在下方填写 Access Token。不是火山方舟的 Key，也不是云 AccessKey/SecretKey。切换 1.0 或复刻资源后，必须把 speaker ID 换成该资源已开通的音色。").font(.caption).foregroundStyle(.secondary)
+                if editor.profile.model == "seed-tts-2.0" {
+                    Button("应用 VV / 2.0 默认音色") { applyVolcenginePreset(editor.profile.volcengineModelPresets[0]) }.font(.caption)
+                }
+                TextField("AppID（仅旧版鉴权填写，新版留空）", text: Binding(get: { editor.profile.volcAppID ?? "" }, set: { editor.profile.volcAppID = $0 }))
+                Text(editor.profile.usesVolcLegacyAuth ? "当前鉴权：AppID + Access Token。切换 AppID 后需重新填写 Token。" : "当前鉴权：新版 API Key。").font(.caption).foregroundStyle(.secondary)
                 Text("支持语速设置；本版暂不发送表达指令。中途失败不会采用残缺音频，重试可能重新计费。").font(.caption).foregroundStyle(.secondary)
                 Link("打开官方接口文档", destination: URL(string: "https://www.volcengine.com/docs/6561/1598757")!)
             } else if editor.profile.kind == .gemini {
@@ -175,11 +190,22 @@ struct ServiceSettings: View {
             } else {
                 Text("兼容 /audio/speech；需支持 24 kHz、单声道、16-bit PCM 或 WAV 返回。").font(.caption).foregroundStyle(.secondary)
             }
-            SecureField("API Key（留空保留当前地址已存密钥）", text: $editor.key).disabled(editor.removeKey)
+            SecureField(editor.profile.usesVolcLegacyAuth ? "Access Token（留空保留当前 AppID 已存凭据）" : "API Key（留空保留当前地址已存密钥）", text: $editor.key).disabled(editor.removeKey)
             Toggle("保存时清除这个地址的密钥", isOn: $editor.removeKey).font(.caption)
             Text("密钥保存在钥匙串。更换地址后需重新输入对应密钥。").font(.caption2).foregroundStyle(.secondary)
             TextField("声音 ID，以逗号分隔", text: $editor.voicesText, axis: .vertical).lineLimit(2...4)
             HStack { Toggle("启用", isOn: $editor.profile.enabled); Toggle("设为新项目默认", isOn: $editor.makeDefault) }
+        }
+    }
+    func applyVolcenginePreset(_ preset: VolcengineModelPreset) {
+        editor.profile.model = preset.model
+        if preset.model == "seed-tts-2.0" {
+            editor.voicesText = ServiceProfile.volcVVVoice
+            editor.testVoice = ServiceProfile.volcVVVoice
+        } else if editor.voicesText.split(whereSeparator: { ",，\n".contains($0) }).map(String.init).contains(ServiceProfile.volcVVVoice) {
+            editor.voicesText = ""
+            editor.testVoice = ""
+            editor.message = "已切换到 \(preset.model)。请粘贴该资源已开通的 speaker ID 后再保存。"
         }
     }
     func add(_ kind: ServiceKind) {

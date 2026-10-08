@@ -16,14 +16,14 @@ enum Subtitles {
         return try render(texts: texts, frames: frames, gaps: Array(repeating: max(0, min(3, pause)), count: audio.count))
     }
     static func render(texts: [String], frames: [Int64], gaps: [Double], style: SubtitleStyle = .paragraph) throws -> String {
+        let result = try cues(texts: texts, frames: frames, gaps: gaps, style: style)
+        return try CaptionTimeline.render(result, duration: CaptionTimeline.duration(frames: frames, gaps: gaps))
+    }
+    static func cues(texts: [String], frames: [Int64], gaps: [Double], style: SubtitleStyle) throws -> [CaptionCue] {
         guard !texts.isEmpty, texts.count == frames.count, frames.count == gaps.count,
               frames.allSatisfy({ $0 > 0 }), gaps.allSatisfy({ $0.isFinite && (0...3).contains($0) }) else { throw VoxError(message: "字幕时间轴无效。") }
         var cursor: Int64 = 0
-        func timestamp(_ frames: Int64) -> String {
-            let ms = (frames * 1000 + 12000) / 24000
-            return String(format: "%02lld:%02lld:%02lld,%03lld", ms / 3600000, ms / 60000 % 60, ms / 1000 % 60, ms % 1000)
-        }
-        var cues: [String] = []
+        var cues: [CaptionCue] = []
         for (i, frameCount) in frames.enumerated() {
             let text = texts[i].components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.joined(separator: "\n")
             guard !text.isEmpty else { throw VoxError(message: "字幕段落为空。") }
@@ -51,11 +51,11 @@ enum Subtitles {
                 if style == .vertical && part.count > 16 {
                     caption = String(part.prefix(16)) + "\n" + String(part.dropFirst(16))
                 } else { caption = part }
-                cues.append("\(cues.count + 1)\n\(timestamp(cursor + previous)) --> \(timestamp(cursor + end))\n\(caption)\n")
+                cues.append(CaptionCue(start: CaptionTimeline.milliseconds(cursor + previous), end: CaptionTimeline.milliseconds(cursor + end), text: caption))
                 previous = end
             }
             cursor += frameCount + Int64(gaps[i] * 24000)
         }
-        return cues.joined(separator: "\n")
+        return cues
     }
 }

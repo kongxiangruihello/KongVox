@@ -3,6 +3,11 @@ import SwiftUI
 final class PrecisionViewState: ObservableObject {
     @Published var tab = "按句精修"
     @Published var confirmSplit = false
+    @Published var localID: UUID?
+    @Published var confirmLocal = false
+    @Published var confirmContext = false
+    @Published var showCaptions = false
+    @Published var showDelivery = false
     @Published var repairID: UUID?
     @Published var showRepair = false
     @Published var name = ""
@@ -27,7 +32,15 @@ struct PrecisionWorkbench: View {
             else { checkView }
             Text(studio.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
         }.padding(24).frame(width: 890, height: 690)
+        .sheet(isPresented: $state.showCaptions) { CaptionEditor().environmentObject(studio) }
+        .sheet(isPresented: $state.showDelivery) { DeliveryView().environmentObject(studio) }
         .sheet(isPresented: $state.showRepair) { if let id = state.repairID { SegmentRepair(segmentID: id).environmentObject(studio) } }
+        .confirmationDialog("只拆分这一段用于局部精修？", isPresented: $state.confirmLocal) {
+            Button("仅拆所选段落") { if let id = state.localID { studio.splitLocal(id) } }
+        } message: { Text("本段原音频保留在历史，新拆出的句子需确认后重新生成并计费。其他段落保持原状，局部语气衔接需试听。") }
+        .confirmationDialog("恢复上下文分批？", isPresented: $state.confirmContext) {
+            Button("恢复并检查范围") { studio.restoreContext() }
+        } message: { Text("按自然段与服务长度重新分批，开头保留短预览段。仅完全匹配的历史音频复用，其他内容需重新生成。已有精修需先备份并处理。") }
         .confirmationDialog("将当前文稿改为按句精修？", isPresented: $state.confirmSplit) {
             Button("开启按句精修") { studio.enableSentenceEditing() }
         } message: { Text("会调整处理范围，无法直接拆用旧的整段音频；已生成的多句段落可能需要重新计费生成。历史音频保留。已有读法、语速或停顿精修时，请先备份并清除精修。") }
@@ -39,12 +52,16 @@ struct PrecisionWorkbench: View {
     var sentenceView: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let p = studio.project {
-                Text(p.sentenceMode ? "按句精修已开启。修改一句后，其他未变化句子的音频会复用。超长句仍需分批。" : "原有分段保持不变。开启按句精修后，可分别设置每句读法、语速与句后停顿，减少后续重做范围。").font(.caption).foregroundStyle(.secondary)
+                Text(p.sentenceMode ? "按句精修已开启。修改一句后，其他未变化句子的音频会复用。超长句仍需分批。" : "上下文分批：普通长文保留较完整语境。需要修正时可只拆所选段落；也可将全文改为按句精修。").font(.caption).foregroundStyle(.secondary)
                 HStack {
                     if !p.sentenceMode { Button("开启按句精修…") { state.confirmSplit = true } }
+                    Button("恢复上下文分批…") { state.confirmContext = true }
                     Button("更新文稿处理范围") { studio.prepareReview() }
                     Text("待合成 \(studio.usageEstimate.generate) 字 · 可复用 \(studio.usageEstimate.reuse) 字").font(.caption)
                 }.disabled(studio.isWorking)
+                Toggle("重做时参考前后句语气（只生成当前句）", isOn: Binding(get: { p.settings.contextHintEnabled == true }, set: { studio.contextAware($0) }))
+                    .toggleStyle(.checkbox).disabled(studio.isWorking)
+                Text("会把相邻句作为节奏参考发送给所选服务，目标句单独生成；支持程度取决于服务模型，可能增加请求内容长度。").font(.caption2).foregroundStyle(.secondary)
                 List {
                     ForEach(Array(p.segments.enumerated()), id: \.element.id) { index, segment in
                         HStack(alignment: .top) {
@@ -54,10 +71,17 @@ struct PrecisionWorkbench: View {
                                 Text("\(p.settings.reading(segment.spokenText).count) 字 · \(studio.ready(segment, settings: p.settings) ? "复用已有音频" : "需要生成")" + (segment.speedOverride.map { " · \(String(format: "%.2f", $0))×" } ?? "") + (segment.pauseOverride.map { " · 停顿 \(String(format: "%.2f", $0)) 秒" } ?? "")).font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
+                            VStack(alignment: .trailing, spacing: 6) {
+                                if SentenceText.chunks(segment.text, limit: p.chunkLimit).count > 1 {
+                                    Button("仅拆此段…") { state.localID = segment.id; state.confirmLocal = true }.disabled(studio.isWorking || (p.isLongMode && p.needsLongPreparation))
+                                }
+                                if index + 1 < p.segments.count { Button("试听接缝") { studio.playSeam(after: segment.id) }.disabled(studio.isWorking) }
+                            }
                             Button("精修 / 对比") { state.repairID = segment.id; state.showRepair = true }.disabled(studio.isWorking || (p.isLongMode && p.needsLongPreparation))
                         }.padding(.vertical, 5)
                     }
                 }
+                if studio.player != nil { Button("停止接缝试听") { studio.stop() } }
                 Text("只调整句后停顿不重新合成；调整读法或语速需要生成对应句子的新版音频，再选择采用。").font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -68,6 +92,12 @@ struct PrecisionWorkbench: View {
                 Picker("导出字幕", selection: Binding(get: { p.resolvedSubtitleStyle }, set: { value in studio.edit { $0.subtitleStyle = value } })) {
                     ForEach(SubtitleStyle.allCases) { Text($0.rawValue).tag($0) }
                 }.disabled(studio.isWorking)
+                Picker("时间对齐", selection: Binding(get: { p.resolvedAlignment }, set: { value in studio.edit { $0.subtitleAlignment = value } })) {
+                    ForEach(SubtitleAlignmentMode.allCases) { Text($0.rawValue).tag($0) }
+                }.disabled(studio.isWorking)
+                if p.resolvedAlignment == .localPauses { Text("本地分析音频能量，在句子边界附近寻找停顿；音频不上传，也不是逐字语音识别。") .font(.caption2).foregroundStyle(.secondary) }
+                Button("打开字幕编辑器…") { state.showCaptions = true }.disabled(studio.isWorking || !studio.fullAudioReady)
+                if p.captionEdits != nil { Text(p.captionsStale ? "手工字幕已过期，请重新加载并核对。" : "已保存手工字幕，导出优先使用手工版本。改变样式后需重新核对。").font(.caption).foregroundStyle(.orange) }
                 Text("设置同时用于单独 SRT、音频字幕 ZIP 和批量导出。字幕保留原稿，替代读法不会写进字幕。").font(.caption)
                 Text("每个已合成片段的起止时间来自真实音频；同片段内的分句和竖屏拆条按字数分配时间，未使用语音识别。需要在剪辑软件中复核精确入点。").font(.caption).foregroundStyle(.orange)
                 let sample = p.segments.first?.text ?? "这是一段字幕示例。可以选择分句，或使用适合竖屏的视频断行。"
@@ -112,6 +142,13 @@ struct PrecisionWorkbench: View {
     var checkView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                Button("打开成品交付检查…") { state.showDelivery = true }.disabled(studio.isWorking)
+                if let p = studio.project {
+                    Text("接缝与短视频").font(.headline)
+                    Toggle("启用接缝淡化", isOn: Binding(get: { p.resolvedSeam.enabled }, set: { enabled in studio.edit { $0.seamOptions = enabled ? (p.seamOptions ?? SeamOptions(crossfadeMilliseconds: 40, gainAdjustment: 0, loopSeamPreview: true)) : SeamOptions() } })).toggleStyle(.checkbox)
+                    HStack { Text("淡化毫秒"); Slider(value: Binding(get: { Double(p.resolvedSeam.crossfadeMilliseconds) }, set: { value in studio.edit { $0.seamOptions = SeamOptions(crossfadeMilliseconds: Int(value.rounded()), gainAdjustment: p.resolvedSeam.gainAdjustment, loopSeamPreview: p.resolvedSeam.loopSeamPreview) } }), in: 0...120, step: 5); Text("\(p.resolvedSeam.crossfadeMilliseconds) ms").monospacedDigit() }.disabled(!p.resolvedSeam.enabled)
+                    Picker("短视频模板", selection: Binding(get: { p.resolvedTemplate }, set: { value in studio.edit { $0.shortVideoTemplate = value } })) { ForEach(ShortVideoTemplate.allCases) { Text($0.rawValue).tag($0) } }
+                }
                 Text("服务配置").font(.headline)
                 Button("检查配置与已存密钥（不计费）") { studio.checkConfiguration() }.disabled(studio.isWorking)
                 Text(studio.preflightMessage).font(.callout).textSelection(.enabled)

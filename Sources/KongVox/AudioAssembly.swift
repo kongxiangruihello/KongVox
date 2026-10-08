@@ -36,8 +36,9 @@ enum AudioAssembly {
         for sample in samples { let raw = UInt16(bitPattern: sample); result.append(UInt8(truncatingIfNeeded: raw)); result.append(UInt8(truncatingIfNeeded: raw >> 8)) }
         return result
     }
-    static func render(urls: [URL], gaps: [Double], normalize: Bool, to destination: URL? = nil) throws -> [Int64] {
+    static func render(urls: [URL], gaps: [Double], normalize: Bool, to destination: URL? = nil, seam: SeamOptions? = nil) throws -> [Int64] {
         guard !urls.isEmpty, urls.count == gaps.count, gaps.allSatisfy({ $0.isFinite && (0...3).contains($0) }) else { throw VoxError(message: "音频合并参数不完整。") }
+        if let seam, seam.enabled { return try renderWithSeams(urls: urls, gaps: gaps, normalize: normalize, to: destination, options: seam) }
         let temp = destination.map { $0.deletingLastPathComponent().appendingPathComponent(".\(UUID()).wav") }
         defer { if let temp { try? FileManager.default.removeItem(at: temp) } }
         var output: FileHandle?
@@ -61,16 +62,45 @@ enum AudioAssembly {
         }
         return frames
     }
+
+    private static func renderWithSeams(urls: [URL], gaps: [Double], normalize: Bool, to destination: URL?, options: SeamOptions) throws -> [Int64] {
+        var chunks: [Data] = []
+        for (index, url) in urls.enumerated() {
+            chunks.append(try prepare(Data(contentsOf: url), trimStart: index > 0 && gaps[index - 1] == 0, trimEnd: index < urls.count - 1 && gaps[index] == 0, normalize: normalize))
+        }
+        let fadeFrames = max(0, min(24000 / 2, options.crossfadeMilliseconds * 24))
+        func adjust(_ data: Data, first: Bool, last: Bool) -> Data {
+            guard fadeFrames > 0 || abs(options.gainAdjustment) > 0.001 else { return data }
+            var samples = stride(from: 0, to: data.count, by: 2).map { Int16(bitPattern: UInt16(data[$0]) | UInt16(data[$0 + 1]) << 8) }
+            let gain = pow(10.0, options.gainAdjustment / 20.0)
+            for i in samples.indices {
+                var value = Double(samples[i]) * gain
+                if first && i < fadeFrames { value *= Double(i) / Double(max(1, fadeFrames)) }
+                if last && i >= max(0, samples.count - fadeFrames) { value *= Double(samples.count - i) / Double(max(1, fadeFrames)) }
+                samples[i] = Int16(max(-32768, min(32767, value.rounded())))
+            }
+            var output = Data(capacity: samples.count * 2)
+            for sample in samples { let raw = UInt16(bitPattern: sample); output.append(UInt8(truncatingIfNeeded: raw)); output.append(UInt8(truncatingIfNeeded: raw >> 8)) }
+            return output
+        }
+        for i in chunks.indices { chunks[i] = adjust(chunks[i], first: i > 0 && gaps[i - 1] == 0, last: i + 1 < chunks.count && gaps[i] == 0) }
+        let frames = chunks.map { Int64($0.count / 2) }
+        guard let destination else { return frames }
+        var pcm = Data()
+        for (i, chunk) in chunks.enumerated() { pcm.append(chunk); if i + 1 < chunks.count { pcm.append(Data(count: Int(gaps[i] * 24000) * 2)) } }
+        try AudioFiles.writePCM(pcm, to: destination)
+        return frames
+    }
 }
 
 enum ExportBundle {
-    static func write(urls: [URL], texts: [String], gaps: [Double], normalize: Bool, destination: URL, subtitleStyle: SubtitleStyle = .paragraph) throws {
+    static func write(urls: [URL], texts: [String], gaps: [Double], normalize: Bool, destination: URL, subtitleStyle: SubtitleStyle = .paragraph, captionProject: Project? = nil, seam: SeamOptions? = nil) throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let staging = destination.deletingLastPathComponent().appendingPathComponent(".\(UUID()).zip")
         defer { try? FileManager.default.removeItem(at: folder); try? FileManager.default.removeItem(at: staging) }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let frames = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: normalize, to: folder.appendingPathComponent("配音.wav"))
-        try Subtitles.render(texts: texts, frames: frames, gaps: gaps, style: subtitleStyle).write(to: folder.appendingPathComponent("配音.srt"), atomically: true, encoding: .utf8)
+        let frames = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: normalize, to: folder.appendingPathComponent("配音.wav"), seam: seam)
+        try (captionProject.map { try $0.captionContent(frames: frames) } ?? Subtitles.render(texts: texts, frames: frames, gaps: gaps, style: subtitleStyle)).write(to: folder.appendingPathComponent("配音.srt"), atomically: true, encoding: .utf8)
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         process.arguments = ["-c", "-k", "--norsrc", folder.path, staging.path]
         process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice

@@ -7,5 +7,7 @@ for size in 16 32 128 256 512; do
   twice=$((size * 2))
   sips -z "$twice" "$twice" Assets/KongVox-icon.png --out ".build/KongVox.iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
-iconutil -c icns .build/KongVox.iconset -o .build/KongVox.icns
+if [ ! -f .build/KongVox.icns ]; then
+  iconutil -c icns .build/KongVox.iconset -o .build/KongVox.icns
+fi
 swift scripts/InstallerArtwork.swift .build/installer-background.png

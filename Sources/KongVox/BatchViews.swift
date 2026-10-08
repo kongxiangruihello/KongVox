@@ -84,6 +84,14 @@ struct BatchWorkbench: View {
                 Button("清空队列") { studio.queue = []; studio.saveQueue() }
             }.disabled(studio.isWorking)
             Text("显示待处理字数（包含可恢复下载的内容），实际计费以服务商为准。再次开始会检查全部项目，复用已完成内容。重启后不会自动生成。").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Text("本队列预计 \(studio.estimatedQueueCharacters()) 字 · 约 \(String(format: "%.2f", studio.estimatedQueueCost())) 元").font(.caption)
+                Spacer()
+                TextField("费用上限（0=不限）", value: $studio.batchBudget.maxYuan, format: .number).frame(width: 150)
+                TextField("字数上限（0=不限）", value: $studio.batchBudget.maxCharacters, format: .number).frame(width: 150)
+                TextField("元/万字", value: $studio.batchBudget.yuanPerTenThousand, format: .number).frame(width: 95)
+                Button("保存预算") { studio.saveBatchBudget() }.disabled(studio.isWorking)
+            }.textFieldStyle(.roundedBorder)
             List {
                 ForEach(Array(studio.queue.enumerated()), id: \.element.id) { index, entry in
                     let p = studio.projects.first { $0.id == entry.projectID }

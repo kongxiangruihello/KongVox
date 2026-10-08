@@ -88,6 +88,7 @@ final class RepairState: ObservableObject {
     @Published var customPause = false
     @Published var pause = 0.35
     @Published var suggestion = ""
+    @Published var showGenerate = false
 }
 struct SegmentRepair: View {
     @EnvironmentObject var studio: Studio
@@ -130,7 +131,7 @@ struct SegmentRepair: View {
                     Button("保存精修") { savePrecision() }.disabled(studio.isWorking || !dirty)
                     Button("生成新版本并试听") {
                         savePrecision()
-                        studio.generate(only: segmentID, audition: true)
+                        state.showGenerate = true
                     }.disabled(studio.isWorking || (p.isLongMode && p.needsLongPreparation))
                     if studio.isWorking && studio.activeSegment == segmentID { Button("取消") { studio.cancel() } }
                 }
@@ -158,6 +159,7 @@ struct SegmentRepair: View {
                 Text(studio.status).font(.caption).foregroundStyle(.secondary)
             }.disabled(studio.isWorking)
         }.padding(24).frame(width: 820, height: 770)
+        .sheet(isPresented: $state.showGenerate) { GenerationReview(scope: [segmentID], initialForce: true, audition: true).environmentObject(studio) }
         .onAppear {
             state.pronunciation = segment?.pronunciation ?? ""
             state.customSpeed = segment?.speedOverride != nil; state.speed = segment?.speedOverride ?? studio.project?.settings.speed ?? 1

@@ -12,6 +12,8 @@ struct VoiceSettings: Codable, Equatable {
     var mode = "短视频口播"
     var direction = ""
     var pause = 0.35
+    // Use neighbouring sentences as prosody context while synthesising only the target sentence.
+    var contextHintEnabled: Bool?
     var instructions: String {
         let base = mode == "短视频口播" ? "用自然的普通话口播，亲切、有感染力，节奏利落，避免夸张的播音腔。" : "用自然的普通话朗读，平稳、温暖、耐听，保持一致的音色和节奏，尊重句子停顿。"
         return base + direction
@@ -35,6 +37,7 @@ struct Segment: Codable, Identifiable {
     var pauseOverride: Double?
     var takes: [Take] = []
     var selectedTake: UUID?
+    var contextFingerprint: String?
     var spokenText: String { pronunciation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? text : pronunciation }
     var current: Take? { takes.first { $0.id == selectedTake } }
     func effectiveSettings(_ base: VoiceSettings) -> VoiceSettings {
@@ -47,6 +50,7 @@ struct Segment: Codable, Identifiable {
         // Pause is applied at export, so it must not invalidate generated speech.
         var fields = [settings.reading(spokenText), settings.voice, String(settings.speed), settings.instructions]
         if !settings.resolvedService.isLegacyOpenAI { fields.append(settings.resolvedService.signature) }
+        fields.append(settings.contextHintEnabled == true ? "context-hints-v1" : "context-hints-off")
         let payload = fields.joined(separator: "\u{0}")
         return SHA256.hash(data: Data(payload.utf8)).map { String(format: "%02x", $0) }.joined()
     }
@@ -70,6 +74,12 @@ struct Project: Codable, Identifiable {
     var sentenceEditing: Bool?
     var preparedSentenceEditing: Bool?
     var subtitleStyle: SubtitleStyle?
+    var captionEdits: CaptionEdits?
+    var localSplitSources: [UUID]?
+    var subtitleAlignment: SubtitleAlignmentMode?
+    var shortVideoTemplate: ShortVideoTemplate?
+    var seamOptions: SeamOptions?
+    var versions: [ProjectVersion]?
     var sentenceMode: Bool { sentenceEditing ?? false }
     var resolvedSubtitleStyle: SubtitleStyle { subtitleStyle ?? .paragraph }
     var levelsEnabled: Bool { normalizeVolume ?? true }
@@ -104,7 +114,7 @@ struct Project: Codable, Identifiable {
         if !needsLongPreparation { longText = text; preparedLongText = text; return }
         var available = segments + (archivedSegments ?? [])
         // Reuse unchanged segments, including their history, pronunciation overrides and recovery IDs.
-        let chunks = sentenceMode ? SentenceText.chunks(text, limit: chunkLimit) : LongChunker.reconcile(text, limit: chunkLimit, existing: available)
+        let chunks = sentenceMode ? SentenceText.chunks(text, limit: chunkLimit) : LongChunker.reconcile(text, limit: chunkLimit, existing: available.filter { !(localSplitSources ?? []).contains($0.id) })
         segments = chunks.map { chunk in
             let piece = chunk.text
             if let index = available.firstIndex(where: { $0.text == piece && $0.spokenText.count <= chunkLimit }) {

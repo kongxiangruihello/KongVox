@@ -37,12 +37,17 @@ final class NoRedirects: NSObject, URLSessionTaskDelegate {
 struct SpeechClient {
     static let secureSession = URLSession(configuration: .ephemeral, delegate: NoRedirects(), delegateQueue: nil)
     var session: URLSession = secureSession
-    func request(text: String, settings: VoiceSettings, key: String) throws -> URLRequest {
+    func request(text: String, settings: VoiceSettings, key: String, context: String? = nil) throws -> URLRequest {
         let profile = try settings.resolvedService.validated()
         guard !key.isEmpty else { throw VoxError(message: "请先在服务设置中保存 \(profile.name) 的 API Key。") }
         guard !key.hasPrefix("gen-lang-client-") else { throw VoxError(message: "这是 Google 项目 ID，不是 API Key。请从 Google AI Studio 获取该项目的密钥。") }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 3000, text.utf8.count <= 12000 else { throw VoxError(message: "朗读文本为空或过长，请拆成更短的段落。") }
         guard profile.voices.contains(settings.voice) else { throw VoxError(message: "当前声音不在服务的声音列表中，请重新选择。") }
+        if profile.kind == .volcengine,
+           profile.model != "seed-tts-2.0",
+           settings.voice == ServiceProfile.volcVVVoice {
+            throw VoxError(message: "火山引擎配置不匹配：\(profile.model) 不能使用 VV 音色 \(ServiceProfile.volcVVVoice)。请切回 seed-tts-2.0，或填写与当前资源对应的 speaker ID。")
+        }
         guard settings.speed.isFinite, (0.7...1.3).contains(settings.speed) else { throw VoxError(message: "语速超出支持范围。") }
         let path: String
         switch profile.kind {
@@ -56,9 +61,17 @@ struct SpeechClient {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"; request.timeoutInterval = 180
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let contextHint = context.map { "\n前后文只用于语气和节奏参考，不要朗读这些文字：\n\($0)\n只朗读目标正文。" } ?? ""
         let body: [String: Any]
         if profile.kind == .volcengine {
-            request.setValue(key, forHTTPHeaderField: "X-Api-Key")
+            let credential = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !credential.isEmpty, !credential.contains("\n"), !credential.contains("\r") else { throw VoxError(message: "请填写有效的火山语音凭据，不要包含换行。") }
+            if profile.usesVolcLegacyAuth {
+                request.setValue(profile.volcAppID, forHTTPHeaderField: "X-Api-App-Id")
+                request.setValue(credential, forHTTPHeaderField: "X-Api-Access-Key")
+            } else {
+                request.setValue(credential, forHTTPHeaderField: "X-Api-Key")
+            }
             request.setValue(profile.model, forHTTPHeaderField: "X-Api-Resource-Id")
             request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Api-Request-Id")
             request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -66,7 +79,7 @@ struct SpeechClient {
                 "audio_params": ["format": "pcm", "sample_rate": 24000, "speech_rate": Int(((settings.speed - 1) * 100).rounded())]]]
         } else if profile.kind == .gemini {
             request.setValue(key, forHTTPHeaderField: "x-goog-api-key")
-            let style = settings.instructions + " 语速目标为正常速度的 \(settings.speed) 倍。"
+            let style = settings.instructions + " 语速目标为正常速度的 \(settings.speed) 倍。" + contextHint
             let part: [String: Any] = profile.modernGemini ? ["text": text, "speech_metadata": ["style": style]] : ["text": "请按以下要求朗读，仅读出正文。\n表达要求：\(style)\n正文：\n\(text)"]
             let voice: [String: Any] = profile.modernGemini ? ["voice": settings.voice] : ["prebuiltVoiceConfig": ["voiceName": settings.voice]]
             body = ["contents": [["role": "user", "parts": [part]]], "generationConfig": ["responseModalities": ["AUDIO"], "speechConfig": ["voiceConfig": voice]]]
@@ -75,7 +88,7 @@ struct SpeechClient {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             var input: [String: Any] = ["text": text, "voice": settings.voice, "language_type": "Auto"]
             if profile.model.hasPrefix("qwen3-tts-instruct-flash") {
-                input["instructions"] = settings.instructions + " 语速目标为正常速度的 \(settings.speed) 倍。"
+                input["instructions"] = settings.instructions + " 语速目标为正常速度的 \(settings.speed) 倍。" + contextHint
                 input["optimize_instructions"] = true
             }
             body = ["model": profile.model, "input": input]
@@ -90,28 +103,34 @@ struct SpeechClient {
                 } else if settings.voice == "longanhuan" {
                     input["instruction"] = settings.mode == "长文章" ? "你正在进行深夜电台广播，你说话的情感是neutral。" : "你正在进行闲聊对话，你说话的情感是neutral。"
                 }
+                if !contextHint.isEmpty, let instruction = input["instruction"] as? String { input["instruction"] = instruction + contextHint }
             }
             body = ["model": profile.model, "input": input]
         } else {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             var speech: [String: Any] = ["model": profile.model, "voice": settings.voice, "input": text, "speed": settings.speed, "response_format": "pcm"]
-            if profile.model != "tts-1" && profile.model != "tts-1-hd" { speech["instructions"] = settings.instructions }
+            if profile.model != "tts-1" && profile.model != "tts-1-hd" { speech["instructions"] = settings.instructions + contextHint }
             body = speech
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
     }
-    func generate(text: String, settings: VoiceSettings, key: String, recoveryFile: URL? = nil) async throws -> Data {
+    func generate(text: String, settings: VoiceSettings, key: String, recoveryFile: URL? = nil, context: String? = nil) async throws -> Data {
         if settings.resolvedService.kind.usesAudioDownload, let file = recoveryFile,
            FileManager.default.fileExists(atPath: file.path) {
             let receipt = try JSONDecoder().decode(DownloadReceipt.self, from: Data(contentsOf: file))
             return try await download(receipt.url, recoveryFile: file)
         }
-        let request = try request(text: text, settings: settings, key: key)
+        let request = try request(text: text, settings: settings, key: key, context: context)
         let data: Data, response: URLResponse
         do { (data, response) = try await session.data(for: request) }
         catch { throw ServiceFailure.network(error, download: false) }
         guard let http = response as? HTTPURLResponse else { throw VoxError(message: "未收到有效响应。") }
+        if settings.resolvedService.kind == .volcengine {
+            try Task.checkCancellation()
+            if !(200..<300).contains(http.statusCode) { throw VolcengineAudio.failure(body: data, httpStatus: http.statusCode, resourceID: settings.resolvedService.model, speaker: settings.voice) }
+            return try VolcengineAudio.decode(data, resourceID: settings.resolvedService.model, speaker: settings.voice)
+        }
         guard (200..<300).contains(http.statusCode) else { throw ServiceFailure.http(http.statusCode, body: data) }
         if settings.resolvedService.kind.usesAudioDownload {
             if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let code = json["code"] as? String, !code.isEmpty {
@@ -124,7 +143,6 @@ struct SpeechClient {
             return try await download(url, recoveryFile: recoveryFile)
         }
         try Task.checkCancellation()
-        if settings.resolvedService.kind == .volcengine { return try VolcengineAudio.decode(data) }
         if settings.resolvedService.kind == .gemini { return try Self.geminiPCM(data) }
         return try Self.audioPCM(data, mime: http.value(forHTTPHeaderField: "Content-Type") ?? "")
     }

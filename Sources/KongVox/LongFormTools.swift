@@ -4,22 +4,34 @@ struct PronunciationRule: Codable, Identifiable, Equatable {
     var id = UUID()
     var word: String
     var reading: String
+    var category: String?
+    var enabled: Bool?
+    var isEnabled: Bool { enabled ?? true }
 }
 enum PronunciationDictionary {
-    static func apply(_ text: String, rules: [PronunciationRule]) -> String {
+    struct Match: Identifiable {
+        var id = UUID()
+        var rule: PronunciationRule
+        var offset: Int
+    }
+    struct Preview { var text: String; var matches: [Match] }
+    static func apply(_ text: String, rules: [PronunciationRule]) -> String { preview(text, rules: rules, recordMatches: false).text }
+    static func preview(_ text: String, rules: [PronunciationRule], recordMatches: Bool = true) -> Preview {
         var seen = Set<String>()
         let rules = rules.filter { !$0.word.isEmpty && !$0.reading.isEmpty && seen.insert($0.word).inserted }
-            .sorted { $0.word.count > $1.word.count }
-        if rules.isEmpty { return text }
-        var result = "", cursor = text.startIndex
+            .filter(\.isEnabled).sorted { $0.word.count > $1.word.count }
+        if rules.isEmpty { return Preview(text: text, matches: []) }
+        var result = "", cursor = text.startIndex, offset = 0, matches: [Match] = []
         while cursor < text.endIndex {
             if let rule = rules.first(where: { text[cursor...].hasPrefix($0.word) }) {
-                result += rule.reading; cursor = text.index(cursor, offsetBy: rule.word.count)
-            } else { result.append(text[cursor]); cursor = text.index(after: cursor) }
+                if recordMatches { matches.append(Match(rule: rule, offset: offset)) }
+                result += rule.reading; cursor = text.index(cursor, offsetBy: rule.word.count); offset += rule.word.count
+            } else { result.append(text[cursor]); cursor = text.index(after: cursor); offset += 1 }
         }
-        return result
+        return Preview(text: result, matches: matches)
     }
 }
+
 struct VoiceChapter: Identifiable {
     var id: UUID { segmentIDs[0] }
     var title: String

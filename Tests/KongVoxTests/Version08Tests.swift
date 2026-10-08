@@ -26,6 +26,40 @@ final class Version08Tests: XCTestCase {
         MockProtocol.count = 0; MockProtocol.failOnRequest = nil; MockProtocol.status = 200; MockProtocol.payload = Data(stream.utf8)
         let generated = try await client.generate(text: "测试", settings: settings, key: "fixture")
         XCTAssertEqual(generated, pcm)
+        var legacy = settings; legacy.service?.volcAppID = "123456789"
+        let legacyRequest = try client.request(text: "测试", settings: legacy, key: "legacy-token")
+        XCTAssertEqual(legacyRequest.value(forHTTPHeaderField: "X-Api-App-Id"), "123456789")
+        XCTAssertEqual(legacyRequest.value(forHTTPHeaderField: "X-Api-Access-Key"), "legacy-token")
+        XCTAssertEqual(legacyRequest.value(forHTTPHeaderField: "X-Api-Key"), nil)
+        XCTAssertFalse(legacy.resolvedService.keyAccount == settings.resolvedService.keyAccount)
+        let restored = try JSONDecoder().decode(ServiceProfile.self, from: JSONEncoder().encode(legacy.resolvedService))
+        XCTAssertEqual(restored.volcAppID, "123456789")
+        let old = try JSONDecoder().decode(ServiceProfile.self, from: JSONEncoder().encode(ServiceProfile.volcengine))
+        XCTAssertFalse(old.usesVolcLegacyAuth)
+        legacy.service?.volcAppID = "bad\nID"
+        XCTAssertThrowsError(try client.request(text: "测试", settings: legacy, key: "token"))
+        let optionalCode = "\u{feff}: heartbeat\rdata: {\"data\":\"AAEC\"}\r\rdata: {\"code\":0,\"data\":\"Aw==\"}\r\rdata: {\"code\":20000000}\r\r"
+        XCTAssertEqual(try VolcengineAudio.decode(Data(optionalCode.utf8)), Data([0, 1, 2, 3]))
+        for httpStatus in [200, 401, 403] {
+            MockProtocol.status = httpStatus
+            MockProtocol.payload = Data(#"{"code":45000000,"message":"authentication failed secret-fixture"}"#.utf8)
+            do { _ = try await client.generate(text: "测试", settings: settings, key: "fixture"); XCTFail("Must reject authentication failure") }
+            catch {
+                XCTAssertTrue(error.localizedDescription.contains("鉴权失败"))
+                XCTAssertFalse(ServiceFailure.report(error).contains("secret-fixture"))
+                XCTAssertTrue(ServiceFailure.report(error).contains("45000000"))
+            }
+        }
+        let voiceFailure = VolcengineAudio.failure(body: Data(#"{"code":45000000,"message":"speaker resource mismatch"}"#.utf8))
+        XCTAssertTrue(voiceFailure.hint.contains("资源 ID"))
+        let mappedFailure = VolcengineAudio.failure(body: Data(#"{"code":45000030}"#.utf8), resourceID: "seed-tts-1.0", speaker: ServiceProfile.volcVVVoice)
+        XCTAssertTrue(mappedFailure.hint.contains("seed-tts-1.0"))
+        XCTAssertTrue(mappedFailure.hint.contains(ServiceProfile.volcVVVoice))
+        var mismatched = settings
+        mismatched.service?.model = "seed-tts-1.0"
+        do { _ = try client.request(text: "测试", settings: mismatched, key: "fixture"); XCTFail("Must reject VV/1.0 mismatch") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("不能使用 VV 音色")) }
+        MockProtocol.status = 200; MockProtocol.payload = Data([0, 0, 1, 0])
     }
     func testImportFormatsAndFiltering() throws {
         let root = try Version03Tests().temporary(); defer { try? FileManager.default.removeItem(at: root) }

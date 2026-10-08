@@ -10,6 +10,8 @@ struct QueueEntry: Codable, Identifiable {
     var id = UUID()
     var projectID: UUID
     var state = "等待"
+    var maxCharacters: Int?
+    var maxYuan: Double?
 }
 extension Studio {
     func savePresets(_ values: [VoicePreset]) {
@@ -66,6 +68,10 @@ extension Studio {
     func skipQueueProject() { queueSkip = true; task?.cancel() }
     func startQueue(skipFailures: Bool) {
         guard !isWorking, storageAvailable, !queue.isEmpty else { return }
+        let totalCharacters = estimatedQueueCharacters()
+        let totalCost = estimatedQueueCost()
+        if batchBudget.maxCharacters > 0 && totalCharacters > batchBudget.maxCharacters { error = "队列预计 \(totalCharacters) 字，超过设定上限 \(batchBudget.maxCharacters) 字。"; return }
+        if batchBudget.maxYuan > 0 && totalCost > batchBudget.maxYuan { error = String(format: "队列预计约 %.2f 元，超过设定上限 %.2f 元。", totalCost, batchBudget.maxYuan); return }
         // Explicit start retries paused/failed/skipped entries, and rechecks previously completed projects.
         for i in queue.indices { queue[i].state = "等待" }
         guard saveQueue() else { return }
@@ -129,14 +135,15 @@ enum BatchExport {
         for (projectIndex, p) in projects.enumerated() {
             guard !p.segments.isEmpty, !p.needsLongPreparation || !p.isLongMode,
                   p.segments.allSatisfy({ $0.ready(p.settings) && $0.current != nil }) else { throw VoxError(message: "「\(p.title)」尚有未生成或待更新的音频。") }
+            if chapters && p.captionEdits != nil { throw VoxError(message: "「\(p.title)」有手工字幕，请按整篇导出以保留自定义时间轴；分章导出暂不拆用手工字幕。") }
             let groups: [(String, [Int])] = chapters ? p.chapters.map { chapter in (chapter.title, p.segments.indices.filter { chapter.segmentIDs.contains(p.segments[$0].id) }) } : [(p.title, Array(p.segments.indices))]
             for (chapterIndex, group) in groups.enumerated() {
                 try Task.checkCancellation()
                 let name = String(format: "%02d-%02d-", projectIndex + 1, chapterIndex + 1) + safeName(p.title) + (chapters ? "-" + safeName(group.0) : "")
                 let urls = group.1.map { root.appendingPathComponent("Audio").appendingPathComponent(p.segments[$0].current!.file) }
                 let gaps = group.1.map { p.gaps[$0] }
-                let frames = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: p.levelsEnabled, to: staging.appendingPathComponent(name + ".wav"))
-                let subtitle = try Subtitles.render(texts: group.1.map { p.segments[$0].text }, frames: frames, gaps: gaps, style: p.resolvedSubtitleStyle)
+                let frames = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: p.levelsEnabled, to: staging.appendingPathComponent(name + ".wav"), seam: p.resolvedSeam)
+                let subtitle = try chapters ? Subtitles.render(texts: group.1.map { p.segments[$0].text }, frames: frames, gaps: gaps, style: p.resolvedSubtitleStyle) : p.captionContent(frames: frames)
                 try subtitle.write(to: staging.appendingPathComponent(name + ".srt"), atomically: true, encoding: .utf8)
                 let duration = Double(frames.reduce(0,+)) / 24000 + gaps.dropLast().reduce(0,+)
                 manifest.append("\(name)\n时长：\(String(format: "%.2f", duration)) 秒\n文件：\(name).wav / \(name).srt\n")

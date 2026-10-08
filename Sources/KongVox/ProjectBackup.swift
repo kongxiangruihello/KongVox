@@ -103,14 +103,18 @@ enum ProjectBackup {
         guard (try input.read(upToCount: 1) ?? Data()).isEmpty else { throw VoxError(message: "备份包含多余数据，未恢复项目。") }
         var p = manifest.project
         p.id = UUID(); p.title += "（恢复副本）"; p.taskState = "待检查"; p.taskMessage = nil; p.usesDictionarySnapshot = true
+        let hadCurrentCaptions = p.captionEdits != nil && !p.captionsStale
+        var segmentMapping: [UUID: UUID] = [:]
         func remap(_ segments: [Segment]) -> [Segment] {
             segments.map { original in
-                var s = original; s.id = UUID()
+                var s = original; s.id = UUID(); segmentMapping[original.id] = s.id
                 for i in s.takes.indices { s.takes[i].file = mapping[s.takes[i].file]! }
                 return s
             }
         }
         p.segments = remap(p.segments); p.archivedSegments = remap(p.archivedSegments ?? [])
+        p.localSplitSources = p.localSplitSources?.compactMap { segmentMapping[$0] }
+        if hadCurrentCaptions { let signature = p.captionSignature; p.captionEdits?.signature = signature }
         success = true; return p
     }
 }

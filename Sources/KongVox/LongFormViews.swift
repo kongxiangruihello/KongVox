@@ -1,43 +1,89 @@
 import SwiftUI
 
-final class GenerationReviewState: ObservableObject { @Published var force = false }
+final class GenerationReviewState: ObservableObject {
+    @Published var force = false
+    @Published var selected = Set<UUID>()
+}
 struct GenerationReview: View {
     @EnvironmentObject var studio: Studio
     @Environment(\.dismiss) private var dismiss
     @StateObject private var state = GenerationReviewState()
     var scope: Set<UUID>?
+    var initialForce = false
+    var audition = false
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
             Text("确认本次生成范围").font(.title2.bold())
-            Text("仅处理待更新内容；已有音频会保留。按句精修可缩小重做范围；未开启时可能需要重做整段。生成按所选服务计费。").foregroundStyle(.secondary)
             if let p = studio.project {
-                let affected = p.segments.filter { (scope == nil || scope!.contains($0.id)) && (state.force || !studio.ready($0, settings: p.settings)) }
-                Text("本次待处理 \(affected.count) 个片段 · \(affected.reduce(0) { $0 + p.settings.reading($1.spokenText).count }) 字（含可恢复下载）").font(.headline)
-                let issues = ServicePreflight.inspect(p, catalog: studio.catalog)
-                ForEach(issues.prefix(3)) { issue in Text(issue.message).font(.caption).foregroundStyle(issue.blocking ? .red : .orange) }
-                HStack { Button("检查配置（不计费）") { studio.checkConfiguration() }; Text(studio.preflightMessage).font(.caption).lineLimit(3) }
+                let impact = GenerationImpact(p, selected: state.selected, force: state.force, ready: { studio.ready($0, settings: p.settings) }, recovery: { studio.hasRecovery($0) })
+                Text("\(p.settings.resolvedService.name) · \(p.settings.voice) · 提交正文按服务商实际计费").font(.caption)
+                Text("新请求 \(impact.generate) 字 · 恢复下载 \(impact.recover) 字 · 所选复用 \(impact.reuse) 字 · 未选保持 \(impact.untouched) 字").font(.headline)
+                Text("仅提交勾选且需要处理的内容；下方展开可核对词典替换后的完整读法。旧音频保留，批量重做不会删除历史。").font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("全选范围内") { state.selected = Set(p.segments.filter { scope == nil || scope!.contains($0.id) }.map(\.id)) }
+                    Button("只选待更新") { state.force = false; state.selected = Set(p.segments.filter { (scope == nil || scope!.contains($0.id)) && !studio.ready($0, settings: p.settings) }.map(\.id)) }
+                    Button("全不选") { state.selected = [] }
+                }
                 List {
-                    ForEach(Array(p.segments.enumerated()).filter { scope == nil || scope!.contains($0.element.id) }, id: \.element.id) { index, segment in
-                        HStack(alignment: .top) {
-                            Text("\(index + 1)").monospacedDigit().frame(width: 32)
-                            VStack(alignment: .leading) {
+                    ForEach(Array(p.segments.enumerated()), id: \.element.id) { index, segment in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(alignment: .top) {
+                                Toggle("选择片段 \(index + 1)", isOn: Binding(get: { state.selected.contains(segment.id) }, set: { value in
+                                    if value { state.selected.insert(segment.id) } else { state.selected.remove(segment.id) }
+                                })).labelsHidden().disabled(scope != nil && !scope!.contains(segment.id))
+                                Text("\(index + 1)").monospacedDigit()
                                 Text(segment.text).lineLimit(3)
-                                Text("\(p.settings.reading(segment.spokenText).count) 字").font(.caption).foregroundStyle(.secondary)
+                                Spacer()
+                                Text(label(segment, p)).font(.caption).foregroundStyle(impact.pending.contains(segment.id) ? .orange : .secondary)
                             }
-                            Spacer()
-                            Text(studio.ready(segment, settings: p.settings) ? (state.force ? "重新生成" : "复用") : studio.hasRecovery(segment) ? "恢复下载" : "需要生成").foregroundStyle(studio.ready(segment, settings: p.settings) ? .green : .orange)
+                            DisclosureGroup("提交读法 · \(p.settings.reading(segment.spokenText).count) 字") {
+                                Text(p.settings.reading(segment.spokenText)).font(.caption).textSelection(.enabled)
+                                DictionaryMatches(text: segment.spokenText, rules: (p.settings.pronunciationRules ?? []) + (p.settings.globalPronunciationRules ?? []))
+                            }.font(.caption)
                         }.padding(.vertical, 5)
                     }
                 }
+                Toggle("重新生成所选已就绪内容（可能再次计费）", isOn: $state.force)
+                let issues = scopedIssues(p, ids: impact.pending)
+                ForEach(issues.prefix(2)) { issue in Text(issue.message).font(.caption).foregroundStyle(issue.blocking ? .red : .orange) }
+                HStack {
+                    Button("返回编辑") { dismiss() }
+                    Spacer()
+                    Button("确认生成 \(impact.pending.count) 个片段") {
+                        dismiss()
+                        if audition, let id = state.selected.first { studio.generate(only: id, audition: true) }
+                        else { studio.generate(scope: state.selected, force: state.force) }
+                    }.buttonStyle(.borderedProminent).disabled(impact.pending.isEmpty || issues.contains(where: \.blocking) || studio.isWorking)
+                }
             }
-            if scope != nil { Toggle("重新生成本章已就绪片段（保留历史，可能再次计费）", isOn: $state.force) }
-            HStack {
-                Button("返回编辑") { dismiss() }
-                Spacer()
-                Button("开始生成待更新内容") { dismiss(); studio.generate(scope: scope, force: state.force) }.buttonStyle(.borderedProminent)
-                    .disabled(studio.isWorking || studio.project?.segments.isEmpty != false || studio.project.map { ServicePreflight.inspect($0, catalog: studio.catalog).contains(where: \.blocking) } == true)
+        }.padding(24).frame(width: 850, height: 650)
+        .onAppear {
+            state.force = initialForce
+            state.selected = scope ?? Set(studio.project?.segments.map(\.id) ?? [])
+        }
+    }
+    func scopedIssues(_ p: Project, ids: Set<UUID>) -> [PreflightIssue] { var copy = p; copy.segments = p.segments.filter { ids.contains($0.id) }; return ServicePreflight.inspect(copy, catalog: studio.catalog) }
+    func label(_ s: Segment, _ p: Project) -> String {
+        if !state.selected.contains(s.id) { return "不处理" }
+        if studio.ready(s, settings: p.settings) && !state.force { return "复用" }
+        if studio.hasRecovery(s) { return "恢复下载" }
+        if studio.ready(s, settings: p.settings) { return "主动重做" }
+        if s.current != nil { return "文稿/声音变更或文件缺失" }
+        return "尚未生成或未采用"
+    }
+}
+struct DictionaryMatches: View {
+    let text: String
+    let rules: [PronunciationRule]
+    var body: some View {
+        let matches = PronunciationDictionary.preview(text, rules: rules).matches
+        let words = Set(matches.map { $0.rule.id })
+        VStack(alignment: .leading, spacing: 4) {
+            if matches.isEmpty { Text("本段无词典命中").foregroundStyle(.secondary) }
+            ForEach(rules.filter { words.contains($0.id) }) { rule in
+                Text("\(rule.category ?? "其他") · \(rule.word) → \(rule.reading) · 命中 \(matches.filter { $0.rule.id == rule.id }.count) 次")
             }
-        }.padding(24).frame(width: 720, height: 520)
+        }.font(.caption)
     }
 }
 final class WorkbenchState: ObservableObject {
@@ -136,6 +182,7 @@ final class DictionaryState: ObservableObject {
     @Published var global = false
     @Published var rules: [PronunciationRule] = []
     @Published var saved = ""
+    @Published var showPreview = false
 }
 struct DictionaryEditor: View {
     @EnvironmentObject var studio: Studio
@@ -149,6 +196,10 @@ struct DictionaryEditor: View {
             List {
                 ForEach($state.rules) { $rule in
                     HStack {
+                        Toggle("启用", isOn: Binding(get: { rule.isEnabled }, set: { rule.enabled = $0 })).labelsHidden()
+                        Picker("类型", selection: Binding(get: { rule.category ?? "其他" }, set: { rule.category = $0 })) {
+                            ForEach(["人名", "地名", "品牌", "多音字", "其他"], id: \.self) { Text($0) }
+                        }.labelsHidden().frame(width: 85)
                         TextField("原词，例如：重庆", text: $rule.word)
                         Image(systemName: "arrow.right")
                         TextField("读法，例如：崇庆", text: $rule.reading)
@@ -162,9 +213,28 @@ struct DictionaryEditor: View {
                     studio.saveDictionary(state.rules, global: state.global)
                     if studio.error == nil { state.saved = "已保存；生成前可检查受影响范围。" }
                 }
+                Button("预览本篇命中") { state.showPreview = true }
                 Text(state.saved).font(.caption).foregroundStyle(.secondary)
             }
         }.disabled(studio.isWorking).onAppear { load() }
+        .sheet(isPresented: $state.showPreview) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack { Text("词典替换预览 · 尚未保存").font(.headline); Spacer(); Button("返回词典") { state.showPreview = false } }
+                Text("只显示实际命中的词条；项目优先、长词优先，不连锁替换。确认无误后返回保存。停用项目同名词条会屏蔽全局同名词条。").font(.caption)
+                if let p = preparedProject {
+                    let globals = state.global && p.usesDictionarySnapshot != true ? state.rules : p.settings.globalPronunciationRules ?? []
+                    let locals = state.global ? p.settings.pronunciationRules ?? [] : state.rules
+                    List(p.segments) { segment in
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(segment.spokenText).font(.caption).foregroundStyle(.secondary)
+                            DictionaryMatches(text: segment.spokenText, rules: locals + globals)
+                            Text("替换后：" + PronunciationDictionary.apply(segment.spokenText, rules: locals + globals)).textSelection(.enabled)
+                        }
+                    }
+                }
+            }.padding(24).frame(width: 760, height: 570)
+        }
     }
+    var preparedProject: Project? { var p = studio.project; if p?.isLongMode == true { p?.prepareLongDocument() }; return p }
     func load() { state.rules = state.global ? studio.globalDictionary : studio.project?.settings.pronunciationRules ?? []; state.saved = "" }
 }

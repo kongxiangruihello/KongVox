@@ -29,7 +29,7 @@ struct WelcomeView: View {
             }.padding(22).background(.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 18))
             Text("配音会按你的服务商账户计费；本地播放与导出不调用合成接口。升级后，macOS 可能要求重新授权钥匙串访问。").font(.caption).foregroundStyle(.secondary)
             HStack {
-                Text("KongVox 0.9 · macOS").font(.caption).foregroundStyle(.secondary)
+                Text("KongVox 0.11.2 · macOS").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("直接开始", action: start).controlSize(.large)
                 Button("配置配音服务", action: configure).buttonStyle(.borderedProminent).controlSize(.large)
