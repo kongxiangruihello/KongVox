@@ -1,4 +1,10 @@
 import Foundation
+import Combine
+
+/// Playhead position, published separately from `Studio` so only the scrubber re-renders while audio plays.
+final class PlaybackClock: ObservableObject {
+    @Published var time = 0.0
+}
 
 struct PlaybackCue: Identifiable, Equatable {
     var id: UUID

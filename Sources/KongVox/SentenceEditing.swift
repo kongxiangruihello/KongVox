@@ -31,7 +31,8 @@ enum SentenceText {
 
 enum ReadingPreview {
     static func suggest(_ source: String) -> String {
-        let pattern = #"\b[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}\b|[0-9]+(?:\.[0-9]+)?|[A-Z]{2,8}"#
+        // Digit lookarounds instead of \b: ICU treats Han characters as word characters, so "于2026-10-04" has no \b before the date.
+        let pattern = #"(?<![0-9])[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?![0-9])|[0-9]+(?:\.[0-9]+)?|[A-Z]{2,8}"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return source }
         let formatter = NumberFormatter(); formatter.locale = Locale(identifier: "zh_CN"); formatter.numberStyle = .spellOut
         func digits(_ value: String) -> String { value.map { c in c.wholeNumberValue.map { String(Array("零一二三四五六七八九")[$0]) } ?? String(c) }.joined() }
@@ -91,7 +92,7 @@ struct CompletionReport {
     static func make(_ project: Project, root: URL) -> CompletionReport {
         var p = project; if p.isLongMode { p.prepareLongDocument() }
         func ready(_ s: Segment) -> Bool {
-            s.ready(p.settings) && s.current.map { FileManager.default.fileExists(atPath: root.appendingPathComponent("Audio/" + $0.file).path) } == true
+            p.isReady(s, root: root)
         }
         let complete = p.segments.filter(ready).count
         let textCount = p.isLongMode ? p.fullText.count : p.segments.reduce(p.draft.count) { $0 + $1.text.count }

@@ -7,6 +7,8 @@ struct ImportedDocument: Identifiable {
 }
 struct ImportOptions { var omitURLs = true; var omitFootnotes = true }
 enum DocumentImport {
+    /// GB18030 (a superset of GBK/GB2312), common in older Chinese .txt files. Tried after UTF-8 and UTF-16.
+    static let gb18030 = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))
     static func read(_ url: URL) throws -> ImportedDocument {
         guard let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 20 * 1024 * 1024 else { throw VoxError(message: "文稿文件超过 20 MB。") }
         let ext = url.pathExtension.lowercased()
@@ -29,7 +31,7 @@ enum DocumentImport {
         } else {
             guard ["txt", "md", "markdown"].contains(ext) else { throw VoxError(message: "请选择 TXT、Markdown 或 DOCX 文稿。") }
             let data = try Data(contentsOf: url)
-            guard let decoded = String(data: data, encoding: .utf8) ?? ((data.starts(with: [0xff, 0xfe]) || data.starts(with: [0xfe, 0xff])) ? String(data: data, encoding: .utf16) : nil) else { throw VoxError(message: "文字编码无法识别，请另存为 UTF-8 文本。") }
+            guard let decoded = String(data: data, encoding: .utf8) ?? ((data.starts(with: [0xff, 0xfe]) || data.starts(with: [0xfe, 0xff])) ? String(data: data, encoding: .utf16) : String(data: data, encoding: gb18030)) else { throw VoxError(message: "文字编码无法识别（已尝试 UTF-8、UTF-16 与 GB18030），请另存为 UTF-8 文本。") }
             text = decoded.replacingOccurrences(of: "\u{FEFF}", with: "")
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 200000 else { throw VoxError(message: "文稿为空或超过 20 万字，请拆成多份后导入。") }

@@ -19,7 +19,7 @@ extension Studio {
     }
     func playSeam(after id: UUID) {
         guard !isWorking, let p = project, let i = p.segments.firstIndex(where: { $0.id == id }), i + 1 < p.segments.count else { return }
-        guard !(p.isLongMode && p.needsLongPreparation), ready(p.segments[i], settings: p.settings), ready(p.segments[i + 1], settings: p.settings) else { error = "接缝两侧需有匹配当前设置的音频。"; return }
+        guard !(p.isLongMode && p.needsLongPreparation), ready(p.segments[i], in: p), ready(p.segments[i + 1], in: p) else { error = "接缝两侧需有匹配当前设置的音频。"; return }
         let folder = root, destination = root.appendingPathComponent("seam-preview.wav")
         stop(); busy = true
         task = Task {
@@ -42,15 +42,26 @@ extension Studio {
         findings = []; qualitySummary = "字幕已改变，请重新检查交付内容。"
         status = "字幕已保存，单独 SRT、ZIP 与整篇批量导出使用此版本。"
     }
+    /// Drops saved manual captions so exports fall back to automatic captions. Audio and manuscript are untouched.
+    func clearCaptionEdits() {
+        guard !isWorking, storageAvailable, project?.captionEdits != nil else { return }
+        edit { $0.captionEdits = nil }
+        status = "已清除手工字幕，导出将使用自动字幕。"
+    }
 }
 enum SeamPreview {
     static func pcm(_ p: Project, after index: Int, root: URL) throws -> Data {
         guard index >= 0, index + 1 < p.segments.count else { throw VoxError(message: "接缝位置无效。") }
         var prepared: [Data] = []
+        let seam = p.resolvedSeam
         for i in index...index + 1 {
-            guard p.segments[i].ready(p.settings), let take = p.segments[i].current else { throw VoxError(message: "接缝音频尚未就绪。") }
+            guard p.isReady(p.segments[i], root: root), let take = p.segments[i].current else { throw VoxError(message: "接缝音频尚未就绪。") }
             let source = try Data(contentsOf: root.appendingPathComponent("Audio").appendingPathComponent(take.file))
-            prepared.append(try AudioAssembly.prepare(source, trimStart: i > 0 && p.gaps[i - 1] == 0, trimEnd: i + 1 < p.segments.count && p.gaps[i] == 0, normalize: p.levelsEnabled))
+            let joinedBefore = i > 0 && p.gaps[i - 1] == 0, joinedAfter = i + 1 < p.segments.count && p.gaps[i] == 0
+            var pcm = try AudioAssembly.prepare(source, trimStart: joinedBefore, trimEnd: joinedAfter, normalize: p.levelsEnabled)
+            // Same seam fades and gain as the exported mix, so the preview is what will be delivered.
+            if seam.enabled { pcm = AudioAssembly.applySeam(pcm, fadeIn: joinedBefore, fadeOut: joinedAfter, options: seam) }
+            prepared.append(pcm)
         }
         var result = Data(prepared[0].suffix(3 * 48000))
         result.append(Data(count: Int(p.gaps[index] * 24000) * 2))

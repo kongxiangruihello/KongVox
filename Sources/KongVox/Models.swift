@@ -54,6 +54,7 @@ struct Segment: Codable, Identifiable {
         let payload = fields.joined(separator: "\u{0}")
         return SHA256.hash(data: Data(payload.utf8)).map { String(format: "%02x", $0) }.joined()
     }
+    /// Fingerprint match only. Use `Project.isReady(_:root:)` for the full rule (audio file and context hints).
     func ready(_ settings: VoiceSettings) -> Bool { current?.fingerprint == fingerprint(settings) }
 }
 struct Project: Codable, Identifiable {
@@ -190,6 +191,16 @@ enum TextSplitter {
             if !remaining.isEmpty { result.append(remaining) }
         }
         return result
+    }
+}
+extension Project {
+    /// The single readiness rule shared by playback, export, delivery checks and batch tools:
+    /// the selected take matches current settings, its audio file exists, and context hints (when enabled) match.
+    func isReady(_ segment: Segment, root: URL) -> Bool {
+        guard segment.ready(settings), let take = segment.current,
+              FileManager.default.fileExists(atPath: root.appendingPathComponent("Audio").appendingPathComponent(take.file).path) else { return false }
+        if settings.contextHintEnabled == true { return segment.contextFingerprint == contextFingerprint(for: segment.id) }
+        return true
     }
 }
 struct VoxError: LocalizedError {

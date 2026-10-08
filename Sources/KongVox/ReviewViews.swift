@@ -28,13 +28,7 @@ struct FinishedReview: View {
                 Text(studio.qualitySummary).font(.caption).lineLimit(1)
             }
             if studio.playbackDuration > 0 {
-                HStack {
-                    Button("−10 秒") { studio.skip(-10) }
-                    Text(Studio.timeLabel(studio.playbackTime)).monospacedDigit()
-                    Slider(value: Binding(get: { studio.playbackTime }, set: { studio.seek($0) }), in: 0...max(0.01, studio.playbackDuration)).accessibilityLabel("成品播放进度")
-                    Text(Studio.timeLabel(studio.playbackDuration)).monospacedDigit()
-                    Button("+10 秒") { studio.skip(10) }
-                }.disabled(studio.isWorking)
+                PlaybackScrubber(clock: studio.clock, label: "成品播放进度").disabled(studio.isWorking)
             }
             ScrollViewReader { proxy in
                 ScrollView {

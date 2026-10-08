@@ -8,7 +8,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Test
-        run: swift test
+        run: |
+          set -o pipefail
+          swift --version
+          swift test 2>&1 | tee test.log
+      - name: Report test errors
+        if: failure()
+        run: |
+          # Surface compiler errors and failed assertions as annotations, visible without downloading logs.
+          grep -E "error:|: error|failed|Fatal error|precondition|Assertion" test.log | grep -v "^Test Suite" | head -40 | while IFS= read -r line; do echo "::error::${line//%/%25}"; done || true
+          tail -15 test.log | while IFS= read -r line; do echo "::warning::${line//%/%25}"; done || true
       - name: Package app
         run: bash scripts/build-app.sh
       - name: Package installer
@@ -20,5 +29,5 @@ jobs:
         with:
           name: KongVox-Mac
           path: |
-            dist/KongVox-0.11.2-Mac.zip
-            dist/KongVox-0.11.2-Mac.dmg
+            dist/KongVox-*-Mac.zip
+            dist/KongVox-*-Mac.dmg

@@ -2,10 +2,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export CLANG_MODULE_CACHE_PATH="${TMPDIR:-/tmp}/kongvox-clang-cache"
-APP="$PWD/dist/KongVox-0.11.2/KongVox.app"
+source version.env
+APP="$PWD/dist/KongVox-$KONGVOX_VERSION/KongVox.app"
 DMG_PYTHON="${DMG_PYTHON:-python3}"
 "$DMG_PYTHON" -c 'import ds_store, mac_alias'
-VOLUME="KongVox 0.11.2 安装"
+VOLUME="KongVox $KONGVOX_VERSION 安装"
 STAGE="$(mktemp -d /tmp/kongvox-dmg.XXXXXX)"
 MOUNT="$STAGE/mount"
 mkdir -p "$STAGE/source/.background" "$MOUNT"
@@ -18,5 +19,5 @@ hdiutil create -quiet -volname "$VOLUME" -srcfolder "$STAGE/source" -ov -format 
 hdiutil attach -quiet -readwrite -noverify -noautoopen -mountpoint "$MOUNT" "$STAGE/writable.dmg"
 "$DMG_PYTHON" scripts/dmg-layout.py "$MOUNT"
 hdiutil detach -quiet "$MOUNT"
-hdiutil convert -quiet "$STAGE/writable.dmg" -format UDZO -ov -o "$PWD/dist/KongVox-0.11.2-Mac.dmg"
-hdiutil verify "$PWD/dist/KongVox-0.11.2-Mac.dmg"
+hdiutil convert -quiet "$STAGE/writable.dmg" -format UDZO -ov -o "$PWD/dist/KongVox-$KONGVOX_VERSION-Mac.dmg"
+hdiutil verify "$PWD/dist/KongVox-$KONGVOX_VERSION-Mac.dmg"

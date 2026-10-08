@@ -54,18 +54,31 @@ extension Project {
         return SHA256.hash(data: (try? encoder.encode(identity)) ?? Data()).map { String(format: "%02x", $0) }.joined()
     }
     var captionsStale: Bool { captionEdits.map { $0.signature != captionSignature } ?? false }
-    func captionCues(frames: [Int64], pcm: Data? = nil) throws -> [CaptionCue] {
-        guard !captionsStale else { throw VoxError(message: "音频、文稿或字幕样式已改变，请打开字幕编辑器重新生成时间轴并核对。") }
+    /// True when automatic captions depend on the rendered PCM (local pause alignment without saved manual captions).
+    var needsAlignmentPCM: Bool { captionEdits == nil && resolvedAlignment == .localPauses }
+    /// Automatic captions for the current audio. Never reads saved manual captions, so it stays usable when they are stale.
+    func autoCaptionCues(frames: [Int64], pcm: Data? = nil) throws -> [CaptionCue] {
         let result: [CaptionCue]
-        if let saved = captionEdits { result = saved.cues }
-        else if resolvedAlignment == .localPauses, let pcm {
+        if resolvedAlignment == .localPauses, let pcm {
             result = try Version011Tools.localPauseCues(texts: segments.map(\.text), frames: frames, gaps: gaps, style: resolvedSubtitleStyle, pcm: pcm)
         } else { result = try Subtitles.cues(texts: segments.map(\.text), frames: frames, gaps: gaps, style: resolvedSubtitleStyle) }
         try CaptionTimeline.validate(result, duration: CaptionTimeline.duration(frames: frames, gaps: gaps))
         return result
     }
-    func captionContent(frames: [Int64]) throws -> String {
-        try CaptionTimeline.render(captionCues(frames: frames), duration: CaptionTimeline.duration(frames: frames, gaps: gaps))
+    /// Captions used for export: saved manual captions when current, otherwise automatic captions.
+    func captionCues(frames: [Int64], pcm: Data? = nil) throws -> [CaptionCue] {
+        guard !captionsStale else { throw VoxError(message: "手工字幕对应的音频、文稿或字幕样式已改变。请打开字幕编辑器重新核对并保存，或清除手工字幕改用自动字幕。") }
+        guard let saved = captionEdits else { return try autoCaptionCues(frames: frames, pcm: pcm) }
+        try CaptionTimeline.validate(saved.cues, duration: CaptionTimeline.duration(frames: frames, gaps: gaps))
+        return saved.cues
+    }
+    func captionContent(frames: [Int64], pcm: Data? = nil) throws -> String {
+        try CaptionTimeline.render(captionCues(frames: frames, pcm: pcm), duration: CaptionTimeline.duration(frames: frames, gaps: gaps))
+    }
+    /// Reads the rendered mix only when local pause alignment needs it.
+    func captionContent(frames: [Int64], renderedAudio: URL) throws -> String {
+        let pcm: Data? = try needsAlignmentPCM ? AudioFiles.extractPCM(Data(contentsOf: renderedAudio)) : nil
+        return try captionContent(frames: frames, pcm: pcm)
     }
     mutating func splitForLocalRepair(_ id: UUID) throws {
         guard !(isLongMode && needsLongPreparation), let i = segments.firstIndex(where: { $0.id == id }) else { throw VoxError(message: "请先更新文稿处理范围。") }
@@ -118,14 +131,21 @@ struct DeliveryReport {
     var audioReady: Bool { !needsPreparation && missing.isEmpty && duration != nil && renderError == nil }
     static func inspect(_ p: Project, root: URL) throws -> DeliveryReport {
         let urls = p.segments.compactMap { $0.current.map { root.appendingPathComponent("Audio").appendingPathComponent($0.file) } }
-        let missing = p.segments.filter { !$0.ready(p.settings) || $0.current.map { !FileManager.default.fileExists(atPath: root.appendingPathComponent("Audio").appendingPathComponent($0.file).path) } ?? true }.map(\.id)
+        let missing = p.segments.filter { !p.isReady($0, root: root) }.map(\.id)
         let candidates = p.segments.filter { s in s.takes.contains { $0.id != s.selectedTake && $0.fingerprint == s.fingerprint(p.settings) } }.map(\.id)
         var report = DeliveryReport(missing: missing, candidates: candidates, findings: try AudioQuality.inspect(p, root: root), needsPreparation: (p.isLongMode && p.needsLongPreparation) || !p.draft.isEmpty || p.segments.isEmpty)
         if missing.isEmpty && !report.needsPreparation {
             do {
-                let frames = try AudioAssembly.render(urls: urls, gaps: p.gaps, normalize: p.levelsEnabled)
+                let frames: [Int64]
+                var pcm: Data?
+                if p.needsAlignmentPCM {
+                    let mixed = try AudioAssembly.renderWithPCM(urls: urls, gaps: p.gaps, normalize: p.levelsEnabled, seam: p.resolvedSeam)
+                    frames = mixed.frames; pcm = mixed.pcm
+                } else {
+                    frames = try AudioAssembly.render(urls: urls, gaps: p.gaps, normalize: p.levelsEnabled, seam: p.resolvedSeam)
+                }
                 report.duration = Double(CaptionTimeline.duration(frames: frames, gaps: p.gaps)) / 1000
-                do { _ = try p.captionContent(frames: frames) } catch { report.subtitleError = error.localizedDescription }
+                do { _ = try p.captionContent(frames: frames, pcm: pcm) } catch { report.subtitleError = error.localizedDescription }
             } catch { report.renderError = error.localizedDescription }
         }
         return report

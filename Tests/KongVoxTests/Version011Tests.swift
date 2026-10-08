@@ -31,7 +31,10 @@ final class Version011Tests: XCTestCase {
             p.prepareLongDocument()
         }
         studio.saveVersion("第一版")
-        let saved = studio.project!.versions!.last!
+        // Versions are stored under Versions/<project id>.json, not inside projects.json.
+        XCTAssertNil(studio.project!.versions)
+        let saved = studio.versions(for: studio.project!.id).last!
+        XCTAssertTrue(FileManager.default.fileExists(atPath: studio.versionsFile(studio.project!.id).path))
         studio.edit { $0.title = "改过的标题" }
         studio.restoreVersion(saved)
         XCTAssertEqual(studio.project?.title, "版本测试")
@@ -51,7 +54,8 @@ final class Version011Tests: XCTestCase {
         let pcm = Data(repeating: 0, count: 56400 * 2)
         let cues = try Version011Tools.localPauseCues(texts: texts, frames: frames, gaps: gaps, style: .paragraph, pcm: pcm)
         XCTAssertEqual(cues.count, 2)
-        XCTAssertTrue(cues[0].end == cues[1].start)
+        // Segment boundaries keep their real pause (0.35 s) instead of being pulled together.
+        XCTAssertEqual(cues[1].start - cues[0].end, 350)
         let ass = try Version011Tools.ass(cues: cues, duration: 2350, style: .headline)
         XCTAssertTrue(ass.contains("[Events]"))
         XCTAssertTrue(ass.contains("Dialogue: 0"))
