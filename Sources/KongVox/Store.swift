@@ -497,23 +497,25 @@ import UniformTypeIdentifiers
             playbackCues = cues; playbackProject = projectID; readingSegment = PlaybackTimeline.current(0, cues: cues)
             playing = true; playbackDuration = player?.duration ?? 0
             playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-                Task { @MainActor in
-                    guard let self else { return }
-                    if let player = self.player {
-                        if let range = self.playbackRange, self.playing, (!player.isPlaying || player.currentTime >= range.upperBound) {
-                            if self.repeatRange { player.currentTime = range.lowerBound; self.playing = player.play(); self.playbackTime = range.lowerBound }
-                            else { player.pause(); player.currentTime = range.upperBound; self.playing = false; self.playbackTime = range.upperBound }
-                            return
-                        }
-                        if player.isPlaying { self.playbackTime = player.currentTime }
-                        else if self.playing { self.playing = false; self.playbackTime = player.duration }
-                        // @Published fires on every assignment; only publish when the highlighted segment changes.
-                        let reading = PlaybackTimeline.current(self.playbackTime, cues: self.playbackCues)
-                        if reading != self.readingSegment { self.readingSegment = reading }
-                    }
-                }
+                // Read the weak capture here, not inside the Task: Swift 5.10 rejects referencing a captured
+                // `var self` from concurrently-executing code. Studio is main-actor isolated, hence Sendable.
+                let studio = self
+                Task { @MainActor in studio?.tickPlayback() }
             }
         } catch { self.error = error.localizedDescription }
+    }
+    private func tickPlayback() {
+        guard let player else { return }
+        if let range = playbackRange, playing, (!player.isPlaying || player.currentTime >= range.upperBound) {
+            if repeatRange { player.currentTime = range.lowerBound; playing = player.play(); playbackTime = range.lowerBound }
+            else { player.pause(); player.currentTime = range.upperBound; playing = false; playbackTime = range.upperBound }
+            return
+        }
+        if player.isPlaying { playbackTime = player.currentTime }
+        else if playing { playing = false; playbackTime = player.duration }
+        // @Published fires on every assignment; only publish when the highlighted segment changes.
+        let reading = PlaybackTimeline.current(playbackTime, cues: playbackCues)
+        if reading != readingSegment { readingSegment = reading }
     }
     func seek(_ seconds: Double) {
         guard seconds.isFinite, let player else { return }
