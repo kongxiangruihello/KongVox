@@ -68,6 +68,8 @@ extension Studio {
             for url in preview.files where allowed.contains(url.lastPathComponent) {
                 let size: Int = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
                 try FileManager.default.removeItem(at: url)
+                // Its cached on-device transcript is no longer needed either.
+                try? FileManager.default.removeItem(at: root.appendingPathComponent("Transcripts").appendingPathComponent(url.lastPathComponent + ".json"))
                 removed += 1; bytes += Int64(size)
             }
             status = "已清理 \(removed) 个未引用的音频文件，释放约 \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))。"

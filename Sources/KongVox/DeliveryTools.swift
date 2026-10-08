@@ -57,28 +57,32 @@ extension Project {
     /// True when automatic captions depend on the rendered PCM (local pause alignment without saved manual captions).
     var needsAlignmentPCM: Bool { captionEdits == nil && resolvedAlignment == .localPauses }
     /// Automatic captions for the current audio. Never reads saved manual captions, so it stays usable when they are stale.
-    func autoCaptionCues(frames: [Int64], pcm: Data? = nil) throws -> [CaptionCue] {
+    /// `root` gives access to cached on-device transcripts for speech alignment; without it that mode falls back to proportional timing.
+    func autoCaptionCues(frames: [Int64], pcm: Data? = nil, root: URL? = nil) throws -> [CaptionCue] {
         let result: [CaptionCue]
         if resolvedAlignment == .localPauses, let pcm {
             result = try Version011Tools.localPauseCues(texts: segments.map(\.text), frames: frames, gaps: gaps, style: resolvedSubtitleStyle, pcm: pcm)
+        } else if resolvedAlignment == .speech, let root {
+            let transcripts = speechTranscripts(root: root)
+            result = try SpeechAlignment.cues(texts: segments.map(\.text), spoken: segments.map(synthesisText), frames: frames, gaps: gaps, style: resolvedSubtitleStyle, transcripts: segments.map { transcripts[$0.id] })
         } else { result = try Subtitles.cues(texts: segments.map(\.text), frames: frames, gaps: gaps, style: resolvedSubtitleStyle) }
         try CaptionTimeline.validate(result, duration: CaptionTimeline.duration(frames: frames, gaps: gaps))
         return result
     }
     /// Captions used for export: saved manual captions when current, otherwise automatic captions.
-    func captionCues(frames: [Int64], pcm: Data? = nil) throws -> [CaptionCue] {
+    func captionCues(frames: [Int64], pcm: Data? = nil, root: URL? = nil) throws -> [CaptionCue] {
         guard !captionsStale else { throw VoxError(message: "手工字幕对应的音频、文稿或字幕样式已改变。请打开字幕编辑器重新核对并保存，或清除手工字幕改用自动字幕。") }
-        guard let saved = captionEdits else { return try autoCaptionCues(frames: frames, pcm: pcm) }
+        guard let saved = captionEdits else { return try autoCaptionCues(frames: frames, pcm: pcm, root: root) }
         try CaptionTimeline.validate(saved.cues, duration: CaptionTimeline.duration(frames: frames, gaps: gaps))
         return saved.cues
     }
-    func captionContent(frames: [Int64], pcm: Data? = nil) throws -> String {
-        try CaptionTimeline.render(captionCues(frames: frames, pcm: pcm), duration: CaptionTimeline.duration(frames: frames, gaps: gaps))
+    func captionContent(frames: [Int64], pcm: Data? = nil, root: URL? = nil) throws -> String {
+        try CaptionTimeline.render(captionCues(frames: frames, pcm: pcm, root: root), duration: CaptionTimeline.duration(frames: frames, gaps: gaps))
     }
     /// Reads the rendered mix only when local pause alignment needs it.
-    func captionContent(frames: [Int64], renderedAudio: URL) throws -> String {
+    func captionContent(frames: [Int64], renderedAudio: URL, root: URL? = nil) throws -> String {
         let pcm: Data? = try needsAlignmentPCM ? AudioFiles.extractPCM(Data(contentsOf: renderedAudio)) : nil
-        return try captionContent(frames: frames, pcm: pcm)
+        return try captionContent(frames: frames, pcm: pcm, root: root)
     }
     mutating func splitForLocalRepair(_ id: UUID) throws {
         guard !(isLongMode && needsLongPreparation), let i = segments.firstIndex(where: { $0.id == id }) else { throw VoxError(message: "请先更新文稿处理范围。") }
@@ -145,7 +149,7 @@ struct DeliveryReport {
                     frames = try AudioAssembly.render(urls: urls, gaps: p.gaps, normalize: p.levelsEnabled, seam: p.resolvedSeam)
                 }
                 report.duration = Double(CaptionTimeline.duration(frames: frames, gaps: p.gaps)) / 1000
-                do { _ = try p.captionContent(frames: frames, pcm: pcm) } catch { report.subtitleError = error.localizedDescription }
+                do { _ = try p.captionContent(frames: frames, pcm: pcm, root: root) } catch { report.subtitleError = error.localizedDescription }
             } catch { report.renderError = error.localizedDescription }
         }
         return report

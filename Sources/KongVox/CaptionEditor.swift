@@ -129,10 +129,10 @@ struct CaptionEditor: View {
             state.duration = CaptionTimeline.duration(frames: frames, gaps: p.gaps)
             let pcm: Data? = try p.resolvedAlignment == .localPauses ? AudioFiles.extractPCM(Data(contentsOf: url)) : nil
             // Automatic captions never depend on saved manual captions, so stale edits can always be replaced here.
-            state.generated = try p.autoCaptionCues(frames: frames, pcm: pcm)
+            state.generated = try p.autoCaptionCues(frames: frames, pcm: pcm, root: studio.root)
             state.signature = p.captionSignature; state.preview = url
             if p.captionsStale { state.cues = state.generated; state.message = "旧字幕对应的音频或设置已改变。已按当前音频重新生成草稿，请核对后保存；也可在交付检查中清除手工字幕。" }
-            else { state.cues = try p.captionCues(frames: frames, pcm: pcm); state.message = "可修改文字、时间、拆条或合并，循环试听核对后保存。" }
+            else { state.cues = try p.captionCues(frames: frames, pcm: pcm, root: studio.root); state.message = "可修改文字、时间、拆条或合并，循环试听核对后保存。" }
             state.initial = state.cues
             if let first = state.cues.first { select(first) }; state.loaded = true
         } catch { state.message = error.localizedDescription }

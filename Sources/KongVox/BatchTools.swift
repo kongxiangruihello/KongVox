@@ -146,11 +146,14 @@ enum BatchExport {
                 let frames = try AudioAssembly.render(urls: urls, gaps: gaps, normalize: p.levelsEnabled, to: audio, seam: p.resolvedSeam)
                 let subtitle: String
                 if !chapters {
-                    subtitle = try p.captionContent(frames: frames, renderedAudio: audio)
+                    subtitle = try p.captionContent(frames: frames, renderedAudio: audio, root: root)
                 } else {
                     let texts = group.1.map { p.segments[$0].text }
                     let cues: [CaptionCue]
-                    if p.resolvedAlignment == .localPauses {
+                    if p.resolvedAlignment == .speech {
+                        let transcripts = p.speechTranscripts(root: root)
+                        cues = try SpeechAlignment.cues(texts: texts, spoken: group.1.map { p.synthesisText(p.segments[$0]) }, frames: frames, gaps: gaps, style: p.resolvedSubtitleStyle, transcripts: group.1.map { transcripts[p.segments[$0].id] })
+                    } else if p.resolvedAlignment == .localPauses {
                         cues = try Version011Tools.localPauseCues(texts: texts, frames: frames, gaps: gaps, style: p.resolvedSubtitleStyle, pcm: AudioFiles.extractPCM(Data(contentsOf: audio)))
                     } else {
                         cues = try Subtitles.cues(texts: texts, frames: frames, gaps: gaps, style: p.resolvedSubtitleStyle)

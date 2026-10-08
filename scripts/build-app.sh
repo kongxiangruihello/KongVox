@@ -26,6 +26,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSSpeechRecognitionUsageDescription</key><string>KongVox 在本机转写已生成的配音，用于发现疑似漏读、重读并对齐字幕；音频不会上传。</string>
 </dict></plist>
 PLIST
 # Ad-hoc by default. Set CODESIGN_IDENTITY to a stable (e.g. self-signed) identity so macOS
