@@ -483,7 +483,7 @@ import UniformTypeIdentifiers
     func adoptTake(segmentID: UUID, takeID: UUID) {
         guard !isWorking, let p = project, let segment = p.segments.first(where: { $0.id == segmentID }),
               let take = segment.takes.first(where: { $0.id == takeID }),
-              take.fingerprint == segment.fingerprint(p.settings), FileManager.default.fileExists(atPath: audioURL(take).path) else {
+              segment.matches(take, p.settings), FileManager.default.fileExists(atPath: audioURL(take).path) else {
             error = "此版本与当前文稿或声音设置不匹配，不能作为当前成品采用。"; return
         }
         edit { p in if let i = p.segments.firstIndex(where: { $0.id == segmentID }) { p.segments[i].selectedTake = takeID } }

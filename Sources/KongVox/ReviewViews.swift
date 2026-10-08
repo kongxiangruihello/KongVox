@@ -140,7 +140,7 @@ struct SegmentRepair: View {
                                 if take.id == segment.selectedTake { Text("已采用").foregroundStyle(.green) }
                                 Button("试听") { studio.play(studio.audioURL(take)) }.disabled(studio.isWorking)
                                 Button("采用") { studio.adoptTake(segmentID: segmentID, takeID: take.id) }
-                                    .disabled(studio.isWorking || dirty || take.fingerprint != segment.fingerprint(p.settings) || take.id == segment.selectedTake)
+                                    .disabled(studio.isWorking || dirty || !segment.matches(take, p.settings) || take.id == segment.selectedTake)
                             }
                             Text("\(take.settings?.voice ?? p.settings.voice) · \(take.service?.name ?? "历史服务")").font(.caption).foregroundStyle(.secondary)
                             Text(take.spokenText ?? segment.spokenText).font(.caption).lineLimit(2)

@@ -91,4 +91,23 @@ final class SpeechCheckTests: XCTestCase {
         // Findings come from the same cached transcript.
         XCTAssertTrue(SpeechCheck.findings(expected: p.synthesisText(first), transcript: SpeechCache.load(first.current!, root: root)!, segmentID: first.id).isEmpty)
     }
+
+    /// Takes generated before 0.11 lack the context-hint marker in their fingerprint; they must stay current while hints are off.
+    func testPre011TakesStayCurrent() throws {
+        var settings = VoiceSettings(); settings.service = .gemini; settings.voice = "Kore"; settings.mode = "长文章"
+        var segment = Segment(text: "孔子生鲁昌平乡陬邑。")
+        let legacy = Take(file: "old.wav", fingerprint: segment.fingerprint(settings, legacyContext: true))
+        segment.takes = [legacy]; segment.selectedTake = legacy.id
+        XCTAssertFalse(legacy.fingerprint == segment.fingerprint(settings))
+        XCTAssertTrue(segment.ready(settings))
+        // Real changes still invalidate it, and so does turning context hints on.
+        var changed = settings; changed.voice = "Puck"
+        XCTAssertFalse(segment.ready(changed))
+        var hinted = settings; hinted.contextHintEnabled = true
+        XCTAssertFalse(segment.ready(hinted))
+        // Current-format takes are unaffected.
+        let current = Take(file: "new.wav", fingerprint: segment.fingerprint(settings))
+        segment.takes = [current]; segment.selectedTake = current.id
+        XCTAssertTrue(segment.ready(settings)); XCTAssertTrue(segment.matches(current, settings))
+    }
 }

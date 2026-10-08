@@ -136,7 +136,7 @@ struct DeliveryReport {
     static func inspect(_ p: Project, root: URL) throws -> DeliveryReport {
         let urls = p.segments.compactMap { $0.current.map { root.appendingPathComponent("Audio").appendingPathComponent($0.file) } }
         let missing = p.segments.filter { !p.isReady($0, root: root) }.map(\.id)
-        let candidates = p.segments.filter { s in s.takes.contains { $0.id != s.selectedTake && $0.fingerprint == s.fingerprint(p.settings) } }.map(\.id)
+        let candidates = p.segments.filter { s in s.takes.contains { $0.id != s.selectedTake && s.matches($0, p.settings) } }.map(\.id)
         var report = DeliveryReport(missing: missing, candidates: candidates, findings: try AudioQuality.inspect(p, root: root), needsPreparation: (p.isLongMode && p.needsLongPreparation) || !p.draft.isEmpty || p.segments.isEmpty)
         if missing.isEmpty && !report.needsPreparation {
             do {

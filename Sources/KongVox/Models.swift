@@ -45,17 +45,25 @@ struct Segment: Codable, Identifiable {
         if let speedOverride { value.speed = speedOverride }
         return value
     }
-    func fingerprint(_ base: VoiceSettings) -> String {
+    func fingerprint(_ base: VoiceSettings) -> String { fingerprint(base, legacyContext: false) }
+    /// `legacyContext`: takes generated before 0.11 were fingerprinted without the context-hint marker.
+    func fingerprint(_ base: VoiceSettings, legacyContext: Bool) -> String {
         let settings = effectiveSettings(base)
         // Pause is applied at export, so it must not invalidate generated speech.
         var fields = [settings.reading(spokenText), settings.voice, String(settings.speed), settings.instructions]
         if !settings.resolvedService.isLegacyOpenAI { fields.append(settings.resolvedService.signature) }
-        fields.append(settings.contextHintEnabled == true ? "context-hints-v1" : "context-hints-off")
+        if !legacyContext { fields.append(settings.contextHintEnabled == true ? "context-hints-v1" : "context-hints-off") }
         let payload = fields.joined(separator: "\u{0}")
         return SHA256.hash(data: Data(payload.utf8)).map { String(format: "%02x", $0) }.joined()
     }
     /// Fingerprint match only. Use `Project.isReady(_:root:)` for the full rule (audio file and context hints).
-    func ready(_ settings: VoiceSettings) -> Bool { current?.fingerprint == fingerprint(settings) }
+    func ready(_ settings: VoiceSettings) -> Bool { current.map { matches($0, settings) } ?? false }
+    /// Whether a take was generated from the current text and voice settings. Pre-0.11 takes (no context-hint marker)
+    /// still match while context hints are off; 0.11.x treated them as outdated and asked for paid regeneration.
+    func matches(_ take: Take, _ base: VoiceSettings) -> Bool {
+        if take.fingerprint == fingerprint(base) { return true }
+        return effectiveSettings(base).contextHintEnabled != true && take.fingerprint == fingerprint(base, legacyContext: true)
+    }
 }
 struct Project: Codable, Identifiable {
     var id = UUID()
