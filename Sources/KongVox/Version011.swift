@@ -5,6 +5,7 @@ import AppKit
 enum SubtitleAlignmentMode: String, Codable, CaseIterable, Identifiable {
     case proportional = "按字数分配"
     case localPauses = "本地停顿辅助 · 不上传音频"
+    case speech = "本机语音识别对齐 · 不上传音频"
     var id: String { rawValue }
 }
 
@@ -196,7 +197,7 @@ enum ShortVideoExport {
         let frames = try AudioAssembly.render(urls: urls, gaps: project.gaps, normalize: project.levelsEnabled, to: audioURL, seam: project.resolvedSeam)
         let total = CaptionTimeline.duration(frames: frames, gaps: project.gaps)
         let pcm: Data? = try project.needsAlignmentPCM ? AudioFiles.extractPCM(Data(contentsOf: audioURL)) : nil
-        let cues = try project.captionCues(frames: frames, pcm: pcm)
+        let cues = try project.captionCues(frames: frames, pcm: pcm, root: root)
         try CaptionTimeline.render(cues, duration: total).write(to: staging.appendingPathComponent("字幕.srt"), atomically: true, encoding: .utf8)
         try Version011Tools.ass(cues: cues, duration: total, style: project.resolvedTemplate).write(to: staging.appendingPathComponent("字幕.ass"), atomically: true, encoding: .utf8)
         try Version011Tools.packageManifest(project: project, duration: Double(total) / 1000, template: project.resolvedTemplate).write(to: staging.appendingPathComponent("项目.json"), atomically: true, encoding: .utf8)

@@ -24,7 +24,7 @@ struct DeliveryView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack { Text("成品交付检查").font(.title2.bold()); Spacer(); Button("关闭") { studio.stop(); dismiss() }.disabled(studio.isWorking) }
-            Text("核对未完成内容、候选版本、字幕和音频提示后，再导出。全部检查在本地进行，规则检查不能判定漏读。").font(.caption).foregroundStyle(.secondary)
+            Text("核对未完成内容、候选版本、字幕和音频提示后，再导出。全部检查在本地进行；「本机转写核对」用 Mac 自带的语音识别找出疑似漏读或重读，音频不上传。").font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("重新检查") { Task { await refresh() } }.disabled(studio.isWorking)
                 Button("生成范围…") { studio.prepareReview(); state.showGenerate = true }.disabled(studio.isWorking)
@@ -40,6 +40,7 @@ struct DeliveryView: View {
                     if p.captionEdits != nil { Button("清除手工字幕…") { state.confirmClearCaptions = true }.font(.caption).disabled(studio.isWorking) }
                 }
                 if report.needsPreparation { Text("文稿为空、尚有未加入的草稿或处理范围待更新。请返回编辑或检查生成范围。").foregroundStyle(.red).font(.caption) }
+                SpeechCheckBar()
                 if let message = report.renderError { Text(message).foregroundStyle(.red).font(.caption) }
                 if let message = report.subtitleError { Text(message).foregroundStyle(.red).font(.caption) }
                 List {
@@ -54,6 +55,14 @@ struct DeliveryView: View {
                             if report.candidates.contains(segment.id) { Text("有其他匹配版本尚未采用；可对比后保留当前选择。").font(.caption).foregroundStyle(.orange) }
                             ForEach(report.findings.filter { $0.segmentID == segment.id }) { finding in
                                 HStack { Text(finding.message).font(.caption); Spacer(); Button("定位试听") { studio.playFinding(finding) }.disabled(studio.isWorking || segment.current == nil) }
+                            }
+                            ForEach(studio.speechFindings(for: segment.id)) { finding in
+                                HStack {
+                                    Label(finding.message, systemImage: "waveform.badge.exclamationmark").font(.caption).foregroundStyle(.orange)
+                                    Spacer()
+                                    Text(Studio.timeLabel(finding.seconds)).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                                    Button("定位试听") { studio.playSpeechFinding(finding) }.disabled(studio.isWorking || segment.current == nil)
+                                }
                             }
                             if index + 1 < p.segments.count { Button("循环试听与下一段接缝") { studio.playSeam(after: segment.id) }.font(.caption).disabled(studio.isWorking) }
                         }.padding(.vertical, 5)
@@ -96,5 +105,26 @@ struct DeliveryView: View {
             state.report = try await Task.detached { try DeliveryReport.inspect(p, root: folder) }.value
             state.revision = p.deliveryRevision; state.message = "检查完成；候选版本和音频提示请人工核对，导出仍使用已采用版本。"
         } catch { state.message = error.localizedDescription; state.report = nil }
+    }
+}
+
+/// On-device transcription check: run, cancel, and summary. Hidden behind an explanation on unsupported systems.
+struct SpeechCheckBar: View {
+    @EnvironmentObject var studio: Studio
+    var body: some View {
+        HStack(spacing: 10) {
+            if studio.speechCheckSupported {
+                if studio.speechChecking {
+                    ProgressView(value: studio.progress).frame(width: 120)
+                    Button("取消核对") { studio.cancel() }
+                } else {
+                    Button("本机转写核对") { studio.runSpeechCheck() }.disabled(studio.isWorking || !studio.fullAudioReady)
+                        .help("用这台 Mac 的语音识别转写每段音频，按读音与文稿比对；已转写的版本会复用。")
+                }
+                Text(studio.speechSummary).font(.caption).foregroundStyle(studio.speechFindings.isEmpty ? Color.secondary : Color.orange)
+            } else {
+                Text("本机转写核对：\(LocalSpeech.unavailableReason)").font(.caption).foregroundStyle(.secondary)
+            }
+        }
     }
 }

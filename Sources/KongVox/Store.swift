@@ -5,6 +5,11 @@ import UniformTypeIdentifiers
 @MainActor final class Studio: ObservableObject {
     @Published var globalDictionary: [PronunciationRule] = []
     @Published var findings: [AudioFinding] = []
+    /// Suspected missing/extra reading from on-device transcription, for `speechFindingsProject`.
+    @Published var speechFindings: [SpeechFinding] = []
+    @Published var speechSummary = "尚未核对"
+    @Published var speechChecking = false
+    var speechFindingsProject: UUID?
     @Published var qualitySummary = "尚未检查"
     @Published var preflightMessage = "尚未检查密钥；配置检查不调用付费接口。"
     @Published var pauseRequested = false
@@ -226,6 +231,7 @@ import UniformTypeIdentifiers
         guard !isWorking, let index = projects.firstIndex(where: { $0.id == selected }) else { return false }
         stop()
         change(&projects[index]); preflightMessage = "配置或文稿已改变，可重新检查。"; findings = []; qualitySummary = "内容已改变，请重新检查"
+        clearSpeechFindings("内容已改变，请重新核对")
         return true
     }
     func newProject() {
@@ -477,7 +483,7 @@ import UniformTypeIdentifiers
     func adoptTake(segmentID: UUID, takeID: UUID) {
         guard !isWorking, let p = project, let segment = p.segments.first(where: { $0.id == segmentID }),
               let take = segment.takes.first(where: { $0.id == takeID }),
-              take.fingerprint == segment.fingerprint(p.settings), FileManager.default.fileExists(atPath: audioURL(take).path) else {
+              segment.matches(take, p.settings), FileManager.default.fileExists(atPath: audioURL(take).path) else {
             error = "此版本与当前文稿或声音设置不匹配，不能作为当前成品采用。"; return
         }
         edit { p in if let i = p.segments.firstIndex(where: { $0.id == segmentID }) { p.segments[i].selectedTake = takeID } }
@@ -565,6 +571,7 @@ import UniformTypeIdentifiers
             panel.allowedContentTypes = [UTType(filenameExtension: "srt") ?? .plainText]
             panel.nameFieldStringValue = p.title + ".srt"
             guard panel.runModal() == .OK, let destination = panel.url else { return }
+            let folder = root
             busy = true; status = "正在计算字幕时间轴…"
             task = Task {
                 defer { busy = false; task = nil }
@@ -578,7 +585,7 @@ import UniformTypeIdentifiers
                         } else {
                             frames = try AudioAssembly.render(urls: urls, gaps: p.gaps, normalize: p.levelsEnabled, seam: p.resolvedSeam)
                         }
-                        let content = try p.captionContent(frames: frames, pcm: pcm)
+                        let content = try p.captionContent(frames: frames, pcm: pcm, root: folder)
                         try content.write(to: destination, atomically: true, encoding: .utf8)
                     }.value
                     status = "已导出段落字幕：\(destination.lastPathComponent)"
@@ -594,11 +601,12 @@ import UniformTypeIdentifiers
             let panel = NSSavePanel(); panel.allowedContentTypes = [.zip]
             panel.nameFieldStringValue = p.title + "-音频与字幕.zip"
             guard panel.runModal() == .OK, let destination = panel.url else { return }
+            let folder = root
             busy = true; stop(); status = "正在导出音频与字幕组合包…"
             task = Task {
                 defer { busy = false; task = nil }
                 do {
-                    try await Task.detached { try ExportBundle.write(urls: urls, texts: p.segments.map(\.text), gaps: p.gaps, normalize: p.levelsEnabled, destination: destination, subtitleStyle: p.resolvedSubtitleStyle, captionProject: p, seam: p.resolvedSeam) }.value
+                    try await Task.detached { try ExportBundle.write(urls: urls, texts: p.segments.map(\.text), gaps: p.gaps, normalize: p.levelsEnabled, destination: destination, subtitleStyle: p.resolvedSubtitleStyle, captionProject: p, seam: p.resolvedSeam, root: folder) }.value
                     status = "已导出同一版本的配音.wav 与配音.srt。"
                     NSWorkspace.shared.activateFileViewerSelecting([destination])
                 } catch { self.error = error.localizedDescription; status = "组合包导出失败，原文件未修改。" }

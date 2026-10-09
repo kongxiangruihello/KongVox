@@ -144,7 +144,7 @@ struct StudioView: View {
         .sheet(isPresented: $state.showTools) { LongFormWorkbench().environmentObject(studio) }
         .sheet(isPresented: $state.showReview) { GenerationReview().environmentObject(studio) }
         .sheet(isPresented: $state.showSettings) { ServiceSettings().environmentObject(studio) }
-        .onChange(of: studio.selected) { _ in studio.stop(); studio.findings = []; studio.qualitySummary = "尚未检查" }
+        .onChange(of: studio.selected) { _ in studio.stop(); studio.findings = []; studio.qualitySummary = "尚未检查"; studio.clearSpeechFindings() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in studio.flushPendingSave() }
         .modifier(MaintenanceDialogs(state: state))
         .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil }; if !studio.diagnostic.isEmpty { Button("复制诊断") { studio.copyDiagnostic(); studio.error = nil } } } message: { Text(studio.error ?? "") }

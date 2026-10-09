@@ -100,6 +100,12 @@ struct PrecisionWorkbench: View {
                     ForEach(SubtitleAlignmentMode.allCases) { Text($0.rawValue).tag($0) }
                 }.disabled(studio.isWorking)
                 if p.resolvedAlignment == .localPauses { Text("本地分析音频能量，只在同一片段内的分句边界前后 0.4 秒寻找明显停顿；片段之间的边界和停顿保持不变，段落字幕不受影响。音频不上传，也不是逐字语音识别。") .font(.caption2).foregroundStyle(.secondary) }
+                if p.resolvedAlignment == .speech {
+                    let done = studio.transcribedCount(p), total = p.segments.count
+                    Text(studio.speechCheckSupported
+                         ? "用本机语音识别的逐字时间确定分句字幕的起点；只用已转写的片段（\(done) / \(total)），其余仍按字数分配。在「成品交付检查」运行「本机转写核对」即可转写。段落字幕不受影响。"
+                         : "本机语音识别对齐：\(LocalSpeech.unavailableReason)导出时按字数分配。").font(.caption2).foregroundStyle(.secondary)
+                }
                 Button("打开字幕编辑器…") { state.showCaptions = true }.disabled(studio.isWorking || !studio.fullAudioReady)
                 if p.captionEdits != nil {
                     HStack {
