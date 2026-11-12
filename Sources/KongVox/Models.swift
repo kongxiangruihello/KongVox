@@ -112,7 +112,7 @@ struct Project: Codable, Identifiable {
     }
     var isLongMode: Bool { longMode ?? true }
     var fullText: String { longText ?? (segments.map(\.text) + (draft.isEmpty ? [] : [draft])).joined(separator: "\n\n") }
-    var chunkLimit: Int { settings.resolvedService.kind == .qwenTTS ? 500 : 700 }
+    var chunkLimit: Int { settings.resolvedService.kind.engine.chunkLimit }
     var needsLongPreparation: Bool {
         sentenceMode != (preparedSentenceEditing ?? false) ||
         fullText != (preparedLongText ?? segments.map(\.text).joined(separator: "\n\n")) ||

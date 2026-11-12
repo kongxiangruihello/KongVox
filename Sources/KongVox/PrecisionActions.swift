@@ -21,7 +21,7 @@ extension Studio {
                 if key.isEmpty { lines.append("需修正：此服务尚未保存 API Key。") }
                 else {
                     let sample = p.segments.first ?? Segment(text: "配置检查")
-                    _ = try client.request(text: p.settings.reading(sample.spokenText), settings: sample.effectiveSettings(p.settings), key: key)
+                    try client.preflight(text: p.settings.reading(sample.spokenText), settings: sample.effectiveSettings(p.settings), key: key)
                     lines.append("本地请求格式与密钥读取正常。")
                 }
             } catch { lines.append("需修正：" + error.localizedDescription) }

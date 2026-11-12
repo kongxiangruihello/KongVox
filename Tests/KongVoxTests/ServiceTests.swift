@@ -12,6 +12,21 @@ final class ServiceTests: XCTestCase {
     func response(_ audio: Data, mime: String = "audio/wav", reason: String = "STOP") throws -> Data {
         try json(["candidates": [["finishReason": reason, "content": ["parts": [["inlineData": ["mimeType": mime, "data": audio.base64EncodedString()]]]]]]])
     }
+    func testEnginesKeepLimitsAndPreflightWithoutNetwork() throws {
+        for kind in ServiceKind.allCases {
+            XCTAssertEqual(kind.engine.chunkLimit, kind == .qwenTTS ? 500 : 700)
+            XCTAssertTrue(kind.engine.requiresKey)
+            XCTAssertTrue(kind.engine is any HTTPSpeechEngine)
+        }
+        var project = Project(); project.settings = settings(.qwenTTS)
+        XCTAssertEqual(project.chunkLimit, 500)
+        let client = SpeechClient()
+        try client.preflight(text: "测试", settings: settings(.qwenTTS), key: "fixture-key")
+        XCTAssertThrowsError(try client.preflight(text: String(repeating: "字", count: 601), settings: settings(.qwenTTS), key: "fixture-key"))
+        XCTAssertThrowsError(try client.preflight(text: "测试", settings: settings(.cosyVoice), key: ""))
+        var mismatched = settings(.volcengine); mismatched.service?.model = "seed-tts-1.0"
+        XCTAssertThrowsError(try client.preflight(text: "测试", settings: mismatched, key: "fixture-key"))
+    }
     func testGeminiRequestFormats() throws {
         let client = SpeechClient()
         let request = try client.request(text: "逐字朗读。", settings: settings(), key: "fixture-key")

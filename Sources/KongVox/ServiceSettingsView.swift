@@ -51,7 +51,7 @@ import AVFoundation
             var settings = VoiceSettings(); settings.service = service; settings.voice = testVoice
             let text = testText
             // Validate before presenting a loading state or making a billable request.
-            if !hasRecovery { _ = try SpeechClient().request(text: text, settings: settings, key: secret) }
+            if !hasRecovery { try SpeechClient().preflight(text: text, settings: settings, key: secret) }
             let recovery = recoveryFile()
             diagnostic = ""; testing = true; message = hasRecovery ? "正在恢复下载…" : "正在生成短句试听…"; player?.stop()
             task = Task {

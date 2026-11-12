@@ -241,7 +241,7 @@ import UniformTypeIdentifiers
     }
     func importDraft() {
         edit { p in
-            p.segments.append(contentsOf: TextSplitter.split(p.draft, limit: p.settings.resolvedService.kind == .qwenTTS ? 500 : 700).map { Segment(text: $0) })
+            p.segments.append(contentsOf: TextSplitter.split(p.draft, limit: p.chunkLimit).map { Segment(text: $0) })
             p.draft = ""
         }
     }
@@ -361,7 +361,7 @@ import UniformTypeIdentifiers
                 if !fresh.isEmpty {
                     generationKey = try keyProvider(service)
                     for segment in fresh {
-                        _ = try client.request(text: snapshot.settings.reading(segment.spokenText), settings: segment.effectiveSettings(snapshot.settings), key: generationKey ?? "", context: snapshot.context(for: segment.id))
+                        try client.preflight(text: snapshot.settings.reading(segment.spokenText), settings: segment.effectiveSettings(snapshot.settings), key: generationKey ?? "", context: snapshot.context(for: segment.id))
                     }
                 }
             } catch {
