@@ -21,7 +21,7 @@ jobs:
       - name: Convert and push
         run: |
           mkdir audio && cd audio
-          for f in ../wav/*.wav; do afconvert -f m4af -d aac -b 96000 "$f" "$(basename "${f%.wav}").m4a"; done
+          for f in ../wav/*.wav; do afconvert -f WAVE -d LEI16 "$f" "$(basename "$f")"; done
           ls -l
           git init -q -b spike/local-tts-audio
           git config user.name "github-actions[bot]"; git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

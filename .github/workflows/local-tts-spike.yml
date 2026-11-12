@@ -2,8 +2,6 @@
 # Builds the upstream command-line tool and uploads sample audio. Delete with the spike branch.
 name: Local TTS spike
 on:
-  push:
-    branches: [spike/local-tts]
   workflow_dispatch:
 permissions:
   contents: read
