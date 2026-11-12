@@ -77,6 +77,7 @@ extension ServiceKind {
         case .gemini: return GeminiEngine()
         case .cosyVoice: return CosyVoiceEngine()
         case .qwenTTS: return QwenEngine()
+        case .localQwen: return LocalQwenEngine()
         }
     }
 }

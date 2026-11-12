@@ -89,6 +89,11 @@ import UniformTypeIdentifiers
                 catalog.builtinsRevision = 3
                 try JSONEncoder().encode(catalog).write(to: servicesFile, options: .atomic)
             }
+            if (catalog.builtinsRevision ?? 0) < 4 {
+                if !catalog.profiles.contains(where: { $0.id == ServiceProfile.localQwen.id }) { catalog.profiles.append(.localQwen) }
+                catalog.builtinsRevision = 4
+                try JSONEncoder().encode(catalog).write(to: servicesFile, options: .atomic)
+            }
             let voicesFile = self.root.appendingPathComponent("voices.json")
             if FileManager.default.fileExists(atPath: voicesFile.path) { voiceFavorites = try JSONDecoder().decode([VoiceFavorite].self, from: Data(contentsOf: voicesFile)) }
             for name in ["presets", "queue"] {

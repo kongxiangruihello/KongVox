@@ -1,6 +1,19 @@
 import SwiftUI
 
-@main struct KongVoxApp: App {
+@main enum KongVoxMain {
+    @MainActor static func main() {
+        // Headless check of the on-device engine; see LocalSpeechSelfTest. Exits without opening a window.
+        if CommandLine.arguments.contains("--local-speech-selftest") {
+            Task.detached {
+                let code = await LocalSpeechSelfTest.run(CommandLine.arguments)
+                exit(code)
+            }
+            dispatchMain()
+        }
+        KongVoxApp.main()
+    }
+}
+struct KongVoxApp: App {
     @StateObject private var studio = Studio()
     var body: some Scene {
         WindowGroup("KongVox") {
@@ -187,6 +200,9 @@ struct StudioView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("表达要求")
                 if p.settings.resolvedService.kind == .volcengine { Text("火山引擎使用资源 ID 选择模型，支持语速；本版暂不应用表达要求。").font(.caption2).foregroundStyle(.secondary) }
+                if p.settings.resolvedService.kind == .localQwen {
+                    Text("本机合成，不计费。表达要求与语速以提示方式传给模型，效果为参考；留空时使用音色原本的读法。").font(.caption2).foregroundStyle(.secondary)
+                }
                 if p.settings.resolvedService.kind == .qwenTTS {
                     Text("Qwen Flash 使用默认语速；Instruct Flash 才支持表达与语速提示。每段最多 600 字。").font(.caption2).foregroundStyle(.secondary)
                 }

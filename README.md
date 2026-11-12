@@ -1,4 +1,17 @@
-# KongVox 0.12.0
+# KongVox 0.13.0
+
+本机合成（2026-11-12）：
+
+- **本机 Qwen3-TTS**：服务列表新增「本机 Qwen3-TTS」，在这台 Mac 上用 MLX 运行 Qwen3-TTS 0.6B，不上传文稿、不计费、不需要 API Key。内置五个中文音色：Vivian、Serena、Uncle_Fu、Dylan、Eric。
+- **首次使用会下载模型**（数 GB）到 `~/.cache/huggingface`，之后可离线使用。建议先在「服务设置 → 本机 Qwen3-TTS → 测试并试听」完成下载。无法访问 Hugging Face 时，把服务地址的域名换成镜像站，路径保留发布者（如 `/mlx-community`）；镜像方式未经实测。
+- **限制**：需要 Apple 芯片和 macOS 14 或更高版本；合成时占用数 GB 内存，速度随机型而定（虚拟 M1 构建机上约为实时的 0.4 倍）。模型没有精确语速控制，语速和表达要求以提示方式传入，效果为参考；不使用前后句语气提示。每段最多 400 字，文稿自动按 300 字以内分段。
+- **服务层重构**：每种服务成为独立的引擎类型（`SpeechEngines.swift`），新增服务不再修改同一个函数。原有服务的请求内容和续传逻辑不变。
+- **构建方式变化**：含本机引擎的安装包必须用完整的 Xcode 构建（MLX 的 Metal 着色库只有 Xcode 能编译），`scripts/build-app.sh` 会自动选择。只有 Command Line Tools 时，脚本构建不含本机引擎的版本，其余功能照常，最低系统仍为 macOS 13。
+- 自检命令：`KongVox.app/Contents/MacOS/KongVox --local-speech-selftest /tmp/test.wav`，不打开窗口，直接用本机引擎合成一段并报告耗时。
+
+依赖：[mlx-audio-swift](https://github.com/Blaizzy/mlx-audio-swift)（固定在已试听验证的提交）与 [mlx-swift](https://github.com/ml-explore/mlx-swift)。模型：[mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16)。
+
+## 0.12.0
 
 本机转写核对（2026-10-08）：
 
@@ -214,12 +227,12 @@ OpenAI 兼容服务需支持 `/audio/speech` 的请求格式，并返回 24 kHz�
 
 ## 构建
 
-macOS 13+，Swift 5.9+ / Xcode Command Line Tools。
+含本机引擎：macOS 14+、完整 Xcode（Xcode 26 还需 `xcodebuild -downloadComponent MetalToolchain`，脚本会自动执行）。不含本机引擎：macOS 13+、Swift 5.9+ / Command Line Tools，设置 `KONGVOX_LOCAL_SPEECH=0`。
 
 ```sh
-swift test  # 完整 Xcode 环境
+KONGVOX_LOCAL_SPEECH=0 swift test  # 单元测试不需要本机引擎
 # 仅有 Command Line Tools：bash scripts/test-core.sh
-bash scripts/build-app.sh
+bash scripts/build-app.sh  # 有 Xcode 时含本机引擎，否则自动构建不含本机引擎的版本
 python3 -m venv /tmp/kongvox-dmg-env
 /tmp/kongvox-dmg-env/bin/pip install ds_store==1.3.1 mac-alias==2.2.2
 DMG_PYTHON=/tmp/kongvox-dmg-env/bin/python3 bash scripts/build-dmg.sh

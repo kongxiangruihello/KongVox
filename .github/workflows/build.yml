@@ -11,7 +11,8 @@ jobs:
         run: |
           set -o pipefail
           swift --version
-          swift test 2>&1 | tee test.log
+          # Unit tests do not need the on-device engine; leaving it out keeps this step fast.
+          KONGVOX_LOCAL_SPEECH=0 swift test 2>&1 | tee test.log
       - name: Report test errors
         if: failure()
         run: |
@@ -20,6 +21,14 @@ jobs:
           tail -15 test.log | while IFS= read -r line; do echo "::warning::${line//%/%25}"; done || true
       - name: Package app
         run: bash scripts/build-app.sh
+      - name: On-device engine self-test
+        # Runs the packaged app headless: downloads the model and synthesises with every built-in voice.
+        run: |
+          set -o pipefail
+          APP=$(ls -d dist/KongVox-*/KongVox.app)
+          "$APP/Contents/MacOS/KongVox" --local-speech-selftest "$RUNNER_TEMP/selftest.wav" Vivian,Serena,Uncle_Fu,Dylan,Eric 2>&1 | tee selftest.log
+          grep -q "SELFTEST OK" selftest.log
+          if grep -q "not found in spkId map" selftest.log; then echo "::error::A built-in voice is missing from the model"; exit 1; fi
       - name: Package installer
         run: |
           python3 -m venv /tmp/kongvox-dmg-env
