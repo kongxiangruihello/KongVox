@@ -1,4 +1,9 @@
-# KongVox 0.13.1
+# KongVox 0.14.0
+
+- **项目分文件存储**：每个项目单独保存为 `Projects/<项目 ID>.json`，顺序记录在 `Projects/index.json`。保存时只重写内容有变化的项目，不再每生成一段就重写全部项目。旧的 `projects.json` 在首次启动时自动转换，并改名为 `projects-before-0.14.json` 保留作备份，不会删除。任何一个项目文件读不出来时，应用停止自动保存，不会覆盖已有文件。转换后请勿再用 0.13 及更早版本打开同一份数据，旧版看不到新格式的项目。
+- **更新下载进度与取消**：在线更新显示下载百分比，网络慢时可以取消，改从发布页下载。
+
+## 0.13.1
 
 - **本机模型下载进度**：首次使用本机 Qwen3-TTS 时，主窗口底部和服务设置里显示下载百分比与已下载大小，随后显示“正在载入”。下载期间可用原有的取消按钮中止；中止后已下载部分能否续传取决于下载库，未经实测。
 
@@ -251,7 +256,7 @@ open dist/KongVox-0.8.1/KongVox.app
 
 数据目录：`~/Library/Application Support/KongVox/`。
 
-- `projects.json`：项目与历史版本元数据。
+- `Projects/`：每个项目一个 JSON 文件，`index.json` 记录顺序（0.14 起；此前为单个 `projects.json`）。
 - `services.json`：服务配置，不含密钥。
 - `Audio/`：历史音频。
 - `projects-before-0.2.json`：首次读取旧项目时保留的备份。

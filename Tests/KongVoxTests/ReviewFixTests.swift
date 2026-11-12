@@ -86,12 +86,16 @@ final class ReviewFixTests: XCTestCase {
         let studio = Studio(root: root, keyProvider: { _ in "" })
         XCTAssertNil(studio.project?.versions)
         XCTAssertEqual(studio.versions(for: legacy.id).map(\.id), [version.id])
-        XCTAssertNil(try JSONDecoder().decode([Project].self, from: Data(contentsOf: file)).first?.versions)
+        // 0.14: the single file is converted to one file per project and kept as a renamed backup.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("projects-before-0.14.json").path))
+        let stored = root.appendingPathComponent("Projects").appendingPathComponent(legacy.id.uuidString + ".json")
+        XCTAssertNil(try JSONDecoder().decode(Project.self, from: Data(contentsOf: stored)).versions)
         studio.editLive { $0.title = "防抖标题" }
         XCTAssertEqual(studio.project?.title, "防抖标题")
-        XCTAssertEqual(try JSONDecoder().decode([Project].self, from: Data(contentsOf: file)).first?.title, "迁移")
+        XCTAssertEqual(try JSONDecoder().decode(Project.self, from: Data(contentsOf: stored)).title, "迁移")
         studio.flushPendingSave()
-        XCTAssertEqual(try JSONDecoder().decode([Project].self, from: Data(contentsOf: file)).first?.title, "防抖标题")
+        XCTAssertEqual(try JSONDecoder().decode(Project.self, from: Data(contentsOf: stored)).title, "防抖标题")
         XCTAssertEqual(Studio(root: root).versions(for: legacy.id).count, 1)
     }
 

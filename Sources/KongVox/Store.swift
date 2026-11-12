@@ -58,12 +58,14 @@ import UniformTypeIdentifiers
     var repeatRange = false
     var storageAvailable = true
     let client: SpeechClient
+    private var projectStore = ProjectStore(root: URL(fileURLWithPath: NSTemporaryDirectory()))
     let keyProvider: (ServiceProfile) throws -> String
     init(root: URL? = nil, client: SpeechClient = SpeechClient(), keyProvider: @escaping (ServiceProfile) throws -> String = { try KeyStore.read(account: $0.keyAccount) }) {
         notificationsEnabled = root == nil && UserDefaults.standard.bool(forKey: "completionNotifications")
         self.client = client
         self.keyProvider = keyProvider
         self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("KongVox")
+        projectStore = ProjectStore(root: self.root)
         do {
             try FileManager.default.createDirectory(at: self.root.appendingPathComponent("Audio"), withIntermediateDirectories: true)
             let dictionaryFile = self.root.appendingPathComponent("dictionary.json")
@@ -106,14 +108,12 @@ import UniformTypeIdentifiers
             let budgetFile = self.root.appendingPathComponent("batch-budget.json")
             if FileManager.default.fileExists(atPath: budgetFile.path) { batchBudget = try JSONDecoder().decode(BatchBudget.self, from: Data(contentsOf: budgetFile)) }
             for i in queue.indices where queue[i].state == "生成中" { queue[i].state = "已暂停" }
-            let file = self.root.appendingPathComponent("projects.json")
-            if FileManager.default.fileExists(atPath: file.path) {
-                projects = try JSONDecoder().decode([Project].self, from: Data(contentsOf: file))
-                let backup = self.root.appendingPathComponent("projects-before-0.2.json")
-                if projects.contains(where: { $0.settings.service == nil }), !FileManager.default.fileExists(atPath: backup.path) {
+            let backup = self.root.appendingPathComponent("projects-before-0.2.json")
+            projects = try projectStore.load(beforeMigrating: { legacy, file in
+                if legacy.contains(where: { $0.settings.service == nil }), !FileManager.default.fileExists(atPath: backup.path) {
                     try FileManager.default.copyItem(at: file, to: backup)
                 }
-            }
+            })
         } catch {
             storageAvailable = false
             self.error = "项目读取失败，已停止自动保存以保护原文件：\(error.localizedDescription)"
@@ -212,7 +212,8 @@ import UniformTypeIdentifiers
         // Any full save also covers a pending debounced save.
         pendingSave?.cancel(); pendingSave = nil
         guard storageAvailable else { return false }
-        do { try JSONEncoder().encode(projects).write(to: root.appendingPathComponent("projects.json"), options: .atomic); return true }
+        // One file per project; only the projects that changed are rewritten.
+        do { try projectStore.save(projects); return true }
         catch { self.error = "保存失败：\(error.localizedDescription)"; return false }
     }
     func edit(_ change: (inout Project) -> Void) {
