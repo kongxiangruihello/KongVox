@@ -89,11 +89,37 @@ enum UpdateLogic {
             return process.terminationStatus
         }.value
     }
+    private final class DownloadBox: @unchecked Sendable { var task: URLSessionDownloadTask?; var observation: NSKeyValueObservation? }
+    /// Downloads to a temporary file, reporting the fraction completed. Cancelling the surrounding task stops the transfer.
+    static func download(_ url: URL, session: URLSession = .shared, progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
+        let box = DownloadBox()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+                let task = session.downloadTask(with: url) { location, response, error in
+                    box.observation = nil
+                    if let error {
+                        continuation.resume(throwing: (error as? URLError)?.code == .cancelled ? CancellationError() : error); return
+                    }
+                    guard let location, (response as? HTTPURLResponse)?.statusCode == 200 else {
+                        continuation.resume(throwing: VoxError(message: "下载更新失败，请稍后重试。")); return
+                    }
+                    // The system deletes its own file when this handler returns, so keep a copy.
+                    let kept = FileManager.default.temporaryDirectory.appendingPathComponent("kongvox-update-\(UUID().uuidString).zip")
+                    do { try FileManager.default.moveItem(at: location, to: kept); continuation.resume(returning: kept) }
+                    catch { continuation.resume(throwing: error) }
+                }
+                box.observation = task.progress.observe(\.fractionCompleted) { value, _ in progress(value.fractionCompleted) }
+                box.task = task
+                task.resume()
+                if Task.isCancelled { task.cancel() }
+            }
+        } onCancel: { box.task?.cancel() }
+    }
     /// Downloads, checks and unpacks a release. Returns the unpacked app, on the same volume as `destination`.
-    static func fetch(_ release: AppRelease, replacing destination: URL, session: URLSession = .shared) async throws -> URL {
-        let (downloaded, response) = try await session.download(from: release.archive)
+    static func fetch(_ release: AppRelease, replacing destination: URL, session: URLSession = .shared, progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws -> URL {
+        let downloaded = try await download(release.archive, session: session, progress: progress)
         defer { try? FileManager.default.removeItem(at: downloaded) }
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw VoxError(message: "下载更新失败，请稍后重试。") }
+        try Task.checkCancellation()
         if let expected = release.sha256, try sha256(of: downloaded) != expected { throw VoxError(message: "下载的更新与发布记录不一致，已放弃。") }
         let staging = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: destination, create: true)
         do {
@@ -115,6 +141,9 @@ enum UpdateLogic {
         case failed(String)
     }
     @Published var phase = Phase.idle
+    /// Share of the update downloaded so far, while installing; nil before the first report and while verifying.
+    @Published var downloadFraction: Double?
+    private var installTask: Task<Void, Never>?
     @Published var showPanel = false
     @Published var autoCheck = UserDefaults.standard.object(forKey: "autoUpdateCheck") as? Bool ?? true {
         didSet { UserDefaults.standard.set(autoCheck, forKey: "autoUpdateCheck") }
@@ -159,10 +188,14 @@ enum UpdateLogic {
         guard let release = availableRelease else { return }
         let destination = Bundle.main.bundleURL
         if let blocker = UpdateLogic.replaceBlocker(destination) { phase = .failed(blocker); return }
-        phase = .installing
-        Task {
+        phase = .installing; downloadFraction = nil
+        installTask = Task {
             do {
-                let app = try await UpdateLogic.fetch(release, replacing: destination)
+                let app = try await UpdateLogic.fetch(release, replacing: destination, progress: { value in
+                    Task { @MainActor [weak self] in if self?.phase == .installing { self?.downloadFraction = value < 1 ? value : nil } }
+                })
+                try Task.checkCancellation()
+                installTask = nil; downloadFraction = nil
                 let helper = Process()
                 helper.executableURL = URL(fileURLWithPath: "/bin/sh")
                 helper.arguments = ["-c", UpdateLogic.swapScript, "kongvox-update", String(ProcessInfo.processInfo.processIdentifier), app.path, destination.path]
@@ -171,10 +204,14 @@ enum UpdateLogic {
                 beforeQuit()
                 NSApp.terminate(nil)
             } catch {
-                phase = .failed((error as? VoxError)?.message ?? "更新未完成：\(error.localizedDescription)")
+                installTask = nil; downloadFraction = nil
+                // Cancelled by the user: go back to offering the same release.
+                phase = error is CancellationError || Task.isCancelled ? .available(release) : .failed((error as? VoxError)?.message ?? "更新未完成：\(error.localizedDescription)")
             }
         }
     }
+    /// Stops a download in progress. Has no effect once the app has started replacing itself.
+    func cancelInstall() { installTask?.cancel() }
 }
 
 struct UpdateView: View {
@@ -189,7 +226,13 @@ struct UpdateView: View {
             case .idle: Text("尚未检查。")
             case .checking: HStack { ProgressView().controlSize(.small); Text("正在检查更新…") }
             case .upToDate: Label("已是最新版本。", systemImage: "checkmark.circle").foregroundStyle(.green)
-            case .installing: HStack { ProgressView().controlSize(.small); Text("正在下载并校验更新，完成后 KongVox 会自动重新打开…") }
+            case .installing:
+                if let fraction = updater.downloadFraction {
+                    ProgressView(value: fraction)
+                    Text("正在下载更新 \(Int(fraction * 100))%，完成后 KongVox 会自动重新打开。网络较慢时可取消，改从发布页下载。").font(.callout)
+                } else {
+                    HStack { ProgressView().controlSize(.small); Text("正在连接或校验更新，完成后 KongVox 会自动重新打开…") }
+                }
             case .failed(let message): Label(message, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
             case .available(let release):
                 Text("发现新版本 \(release.version)").font(.headline)
@@ -203,7 +246,9 @@ struct UpdateView: View {
                 Link("打开发布页", destination: updater.availableRelease?.page ?? URL(string: "https://github.com/\(UpdateLogic.repository)/releases")!)
                 Spacer()
                 Button("关闭") { dismiss() }.disabled(updater.phase == .installing)
-                if updater.availableRelease != nil {
+                if updater.phase == .installing {
+                    Button("取消下载") { updater.cancelInstall() }
+                } else if updater.availableRelease != nil {
                     Button("下载并安装") { updater.install(beforeQuit: { studio.flushPendingSave() }) }.buttonStyle(.borderedProminent).disabled(studio.isWorking)
                 } else {
                     Button("重新检查") { updater.check(manual: true) }.disabled(updater.phase == .checking || updater.phase == .installing)
