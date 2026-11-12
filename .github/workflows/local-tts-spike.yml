@@ -1,0 +1,67 @@
+# Temporary experiment: can mlx-audio-swift synthesise usable Mandarin on Apple Silicon?
+# Builds the upstream command-line tool and uploads sample audio. Delete with the spike branch.
+name: Local TTS spike
+on:
+  push:
+    branches: [spike/local-tts]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  spike:
+    runs-on: macos-26
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Blaizzy/mlx-audio-swift
+          ref: e0de9e79d69c24a1277982bb3d8fafc4da5ce035
+      - name: Machine
+        run: |
+          sw_vers; xcodebuild -version; sysctl -n machdep.cpu.brand_string hw.memsize
+      - name: Install Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+      - name: Build CLI
+        run: |
+          set -o pipefail
+          xcodebuild build -scheme mlx-audio-swift-tts -configuration Release -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/DD" CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO 2>&1 | tail -40
+          ls "$RUNNER_TEMP/DD/Build/Products/Release" | head -40
+      - name: Kokoro (zf_xiaobei)
+        continue-on-error: true
+        run: |
+          cd "$RUNNER_TEMP/DD/Build/Products/Release"; mkdir -p "$RUNNER_TEMP/out"
+          export DYLD_FRAMEWORK_PATH="$PWD"
+          /usr/bin/time -l ./mlx-audio-swift-tts --model mlx-community/Kokoro-82M-bf16 --voice zf_xiaobei \
+            --text "学而时习之，不亦说乎？有朋自远方来，不亦乐乎？" --output "$RUNNER_TEMP/out/kokoro-classical.wav" 2>&1 | tail -30
+          /usr/bin/time -l ./mlx-audio-swift-tts --model mlx-community/Kokoro-82M-bf16 --voice zf_xiaobei \
+            --text "二〇二六年十一月十二日，这是一段本地语音合成测试。重庆的银行行长说，音乐让人快乐，他长大以后还要继续学习。" \
+            --output "$RUNNER_TEMP/out/kokoro-modern.wav" 2>&1 | tail -30
+      - name: Kokoro (zm_yunjian)
+        continue-on-error: true
+        run: |
+          cd "$RUNNER_TEMP/DD/Build/Products/Release"; export DYLD_FRAMEWORK_PATH="$PWD"
+          ./mlx-audio-swift-tts --model mlx-community/Kokoro-82M-bf16 --voice zm_yunjian \
+            --text "二〇二六年十一月十二日，这是一段本地语音合成测试。重庆的银行行长说，音乐让人快乐，他长大以后还要继续学习。" \
+            --output "$RUNNER_TEMP/out/kokoro-modern-male.wav" 2>&1 | tail -15
+      - name: Qwen3-TTS 0.6B (Vivian)
+        continue-on-error: true
+        run: |
+          cd "$RUNNER_TEMP/DD/Build/Products/Release"; export DYLD_FRAMEWORK_PATH="$PWD"
+          /usr/bin/time -l ./mlx-audio-swift-tts --model mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16 --voice Vivian --language Chinese \
+            --text "学而时习之，不亦说乎？有朋自远方来，不亦乐乎？" --output "$RUNNER_TEMP/out/qwen3-classical.wav" 2>&1 | tail -30
+          /usr/bin/time -l ./mlx-audio-swift-tts --model mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16 --voice Vivian --language Chinese \
+            --text "二〇二六年十一月十二日，这是一段本地语音合成测试。重庆的银行行长说，音乐让人快乐，他长大以后还要继续学习。" \
+            --output "$RUNNER_TEMP/out/qwen3-modern.wav" 2>&1 | tail -30
+      - name: Results
+        if: always()
+        run: |
+          ls -l "$RUNNER_TEMP/out" || true
+          for f in "$RUNNER_TEMP"/out/*.wav; do afinfo "$f" | grep -E 'File:|duration|Data format' || true; done
+          du -sh ~/.cache/huggingface 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: local-tts-samples
+          path: ${{ runner.temp }}/out
+          if-no-files-found: warn
