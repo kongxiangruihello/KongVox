@@ -11,11 +11,13 @@ let localSpeech = ProcessInfo.processInfo.environment["KONGVOX_LOCAL_SPEECH"] !=
 let packageDependencies: [Package.Dependency] = localSpeech ? [
     .package(url: "https://github.com/Blaizzy/mlx-audio-swift.git", revision: "e0de9e79d69c24a1277982bb3d8fafc4da5ce035"),
     .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.33.0"),
+    .package(url: "https://github.com/huggingface/swift-huggingface.git", from: "0.8.1"),
 ] : []
 let appDependencies: [Target.Dependency] = localSpeech ? [
     .product(name: "MLXAudioTTS", package: "mlx-audio-swift"),
     .product(name: "MLXAudioCore", package: "mlx-audio-swift"),
     .product(name: "MLX", package: "mlx-swift"),
+    .product(name: "HuggingFace", package: "swift-huggingface"),
 ] : []
 
 let package = Package(

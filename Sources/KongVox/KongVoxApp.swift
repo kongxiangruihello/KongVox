@@ -244,6 +244,7 @@ struct StudioView: View {
                 Button("停止") { studio.stop() }
             }
             VStack(alignment: .leading, spacing: 4) {
+                LocalModelProgressView()
                 Text(studio.status).font(.caption).lineLimit(2)
                 if studio.isWorking { ProgressView(value: studio.progress).frame(width: 180) }
             }

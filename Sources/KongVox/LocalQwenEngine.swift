@@ -1,9 +1,38 @@
-import Foundation
+import SwiftUI
 #if canImport(MLXAudioTTS)
 import MLX
 import MLXAudioCore
 import MLXAudioTTS
+import HuggingFace
 #endif
+
+/// What the on-device engine is doing before it can speak: downloading the model, then loading it.
+/// Shown in the main window and in service settings; nil message means there is nothing to show.
+@MainActor final class LocalModelStatus: ObservableObject {
+    static let shared = LocalModelStatus()
+    @Published var message: String?
+    @Published var fraction: Double?
+    func set(_ message: String?, fraction: Double? = nil) { self.message = message; self.fraction = fraction }
+    func report(_ progress: Progress) {
+        let value = progress.fractionCompleted
+        guard value.isFinite else { return }
+        let done = progress.completedUnitCount, total = progress.totalUnitCount
+        // The unit is bytes for a model download; only show sizes when the total looks like one.
+        let sizes = total > 10_000_000 ? String(format: "（%.1f / %.1f GB）", Double(done) / 1e9, Double(total) / 1e9) : ""
+        set(String(format: "正在下载本机模型 %.0f%%", max(0, min(1, value)) * 100) + sizes + "，可随时取消", fraction: max(0, min(1, value)))
+    }
+}
+struct LocalModelProgressView: View {
+    @ObservedObject private var status = LocalModelStatus.shared
+    var body: some View {
+        if let message = status.message {
+            VStack(alignment: .leading, spacing: 4) {
+                if let fraction = status.fraction { ProgressView(value: fraction) } else { ProgressView().controlSize(.small) }
+                Text(message).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
 
 /// Qwen3-TTS running on this Mac through MLX. Nothing is uploaded and nothing is billed;
 /// the model is downloaded once from the address in the service profile.
@@ -95,8 +124,21 @@ actor LocalQwenRuntime {
         if let loaded, loaded.repository == repository { model = loaded.model }
         else {
             loaded = nil
-            do { model = try await TTS.loadModel(modelRepo: repository) }
+            do {
+                // Fetch the files first with progress reporting; loading then finds them in the cache.
+                guard let id = Repo.ID(rawValue: repository) else { throw VoxError(message: "本机模型名称无效。") }
+                await LocalModelStatus.shared.set("正在检查本机模型…")
+                let cache = HubCache.default
+                let client = HubClient(cache: cache)
+                _ = try await ModelUtils.resolveOrDownloadModel(client: client, cache: client.cache ?? cache, repoID: id, requiredExtension: "safetensors",
+                    progressHandler: { progress in LocalModelStatus.shared.report(progress) })
+                try Task.checkCancellation()
+                await LocalModelStatus.shared.set("正在载入本机模型…")
+                model = try await TTS.loadModel(modelRepo: repository)
+                await LocalModelStatus.shared.set(nil)
+            }
             catch {
+                await LocalModelStatus.shared.set(nil)
                 if error is CancellationError || Task.isCancelled { throw CancellationError() }
                 throw ServiceFailure(stage: "本机模型加载失败", category: "local_model",
                     hint: "首次使用需联网下载模型（数 GB），请检查网络或代理后重试；无法访问时可把服务地址改为镜像站。原因：\(String(error.localizedDescription.prefix(160)))")

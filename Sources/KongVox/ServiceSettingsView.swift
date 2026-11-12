@@ -54,7 +54,7 @@ import AVFoundation
             // Validate before presenting a loading state or making a billable request.
             if !hasRecovery { try SpeechClient().preflight(text: text, settings: settings, key: secret) }
             let recovery = recoveryFile()
-            diagnostic = ""; testing = true; message = hasRecovery ? "正在恢复下载…" : needsKey ? "正在生成短句试听…" : "正在用本机模型生成试听；首次使用需下载模型（数 GB），请耐心等待…"; player?.stop()
+            diagnostic = ""; testing = true; message = hasRecovery ? "正在恢复下载…" : needsKey ? "正在生成短句试听…" : "正在用本机模型生成试听；首次使用需下载模型，进度见下方。"; player?.stop()
             task = Task {
                 defer { testing = false; task = nil }
                 do {
@@ -118,6 +118,7 @@ struct ServiceSettings: View {
                             else { Button(editor.hasRecovery ? "继续下载并试听" : "测试并试听") { editor.test() } }
                         }
                         Text("测试会发送上方短句至 \(editor.profile.endpointHost)，可能产生 API 费用。不会自动保存配置或修改项目。").font(.caption).foregroundStyle(.secondary)
+                        LocalModelProgressView()
                         if !editor.message.isEmpty { Text(editor.message).font(.callout).textSelection(.enabled) }
                         HStack {
                             if !editor.diagnostic.isEmpty { Button("复制诊断（不含密钥和文稿）") { editor.copyDiagnostic() } }
