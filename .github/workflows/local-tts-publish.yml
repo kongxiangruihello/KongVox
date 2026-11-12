@@ -1,0 +1,29 @@
+# Temporary: copy the spike's sample audio onto a branch so it can be fetched with git.
+name: Local TTS spike audio
+on:
+  push:
+    branches: [spike/local-tts]
+    paths: [.github/workflows/local-tts-publish.yml]
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: local-tts-samples
+          run-id: 43217477712
+          github-token: ${{ github.token }}
+          path: wav
+      - name: Convert and push
+        run: |
+          mkdir audio && cd audio
+          for f in ../wav/*.wav; do afconvert -f m4af -d aac -b 96000 "$f" "$(basename "${f%.wav}").m4a"; done
+          ls -l
+          git init -q -b spike/local-tts-audio
+          git config user.name "github-actions[bot]"; git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add . && git commit -q -m "Sample audio from the local TTS spike"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" spike/local-tts-audio
