@@ -11,7 +11,8 @@ jobs:
         run: |
           set -o pipefail
           swift --version
-          swift test 2>&1 | tee test.log
+          # Unit tests do not need the on-device engine; leaving it out keeps this step fast.
+          KONGVOX_LOCAL_SPEECH=0 swift test 2>&1 | tee test.log
       - name: Report test errors
         if: failure()
         run: |
@@ -20,6 +21,14 @@ jobs:
           tail -15 test.log | while IFS= read -r line; do echo "::warning::${line//%/%25}"; done || true
       - name: Package app
         run: bash scripts/build-app.sh
+      - name: On-device engine self-test
+        # Runs the packaged app headless: downloads the model and synthesises with every built-in voice.
+        run: |
+          set -o pipefail
+          APP=$(ls -d dist/KongVox-*/KongVox.app)
+          "$APP/Contents/MacOS/KongVox" --local-speech-selftest "$RUNNER_TEMP/selftest.wav" Vivian,Serena,Uncle_Fu,Dylan,Eric 2>&1 | tee selftest.log
+          grep -q "SELFTEST OK" selftest.log
+          if grep -q "not found in spkId map" selftest.log; then echo "::error::A built-in voice is missing from the model"; exit 1; fi
       - name: Package installer
         run: |
           python3 -m venv /tmp/kongvox-dmg-env
@@ -31,3 +40,28 @@ jobs:
           path: |
             dist/KongVox-*-Mac.zip
             dist/KongVox-*-Mac.dmg
+  # Pushing a tag like v0.13.0 publishes the build as a release. The app's "检查更新" reads the latest release.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: KongVox-Mac
+          path: dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source version.env
+          if [ "$GITHUB_REF_NAME" != "v$KONGVOX_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version.env ($KONGVOX_VERSION)"; exit 1
+          fi
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" "dist/KongVox-$KONGVOX_VERSION-Mac.zip" "dist/KongVox-$KONGVOX_VERSION-Mac.dmg" \
+            --title "KongVox $KONGVOX_VERSION" --generate-notes \
+            --notes "安装：下载 DMG，把 KongVox 拖到「应用程序」。已安装的版本可在菜单「KongVox → 检查更新…」中直接升级。更新内容见 README。"

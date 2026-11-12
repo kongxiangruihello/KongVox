@@ -12,6 +12,54 @@ final class ServiceTests: XCTestCase {
     func response(_ audio: Data, mime: String = "audio/wav", reason: String = "STOP") throws -> Data {
         try json(["candidates": [["finishReason": reason, "content": ["parts": [["inlineData": ["mimeType": mime, "data": audio.base64EncodedString()]]]]]]])
     }
+    func testEnginesKeepLimitsAndPreflightWithoutNetwork() throws {
+        for kind in ServiceKind.allCases where kind != .localQwen {
+            XCTAssertEqual(kind.engine.chunkLimit, kind == .qwenTTS ? 500 : 700)
+            XCTAssertTrue(kind.engine.requiresKey)
+            XCTAssertTrue(kind.engine is any HTTPSpeechEngine)
+        }
+        var project = Project(); project.settings = settings(.qwenTTS)
+        XCTAssertEqual(project.chunkLimit, 500)
+        let client = SpeechClient()
+        try client.preflight(text: "测试", settings: settings(.qwenTTS), key: "fixture-key")
+        XCTAssertThrowsError(try client.preflight(text: String(repeating: "字", count: 601), settings: settings(.qwenTTS), key: "fixture-key"))
+        XCTAssertThrowsError(try client.preflight(text: "测试", settings: settings(.cosyVoice), key: ""))
+        var mismatched = settings(.volcengine); mismatched.service?.model = "seed-tts-1.0"
+        XCTAssertThrowsError(try client.preflight(text: "测试", settings: mismatched, key: "fixture-key"))
+    }
+    func testLocalQwenNeedsNoKeyAndBuildsItsPrompt() throws {
+        let engine = ServiceKind.localQwen.engine
+        XCTAssertFalse(engine.requiresKey)
+        XCTAssertFalse(engine is any HTTPSpeechEngine)
+        XCTAssertEqual(engine.chunkLimit, 300)
+        XCTAssertFalse(ServiceKind.localQwen.usesAudioDownload)
+        XCTAssertEqual(LocalQwenEngine.voicePrompt(speaker: "Vivian", direction: "  ", speed: 1), "Vivian")
+        XCTAssertEqual(LocalQwenEngine.voicePrompt(speaker: "Vivian", direction: "像朋友聊天", speed: 1), "Vivian, 像朋友聊天")
+        XCTAssertEqual(LocalQwenEngine.voicePrompt(speaker: "Eric", direction: "沉稳", speed: 0.85), "Eric, 沉稳。语速约为正常速度的 0.85 倍")
+        let source = try ServiceProfile.localQwen.validated().localModelRepository()
+        XCTAssertEqual(source.repository, "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16")
+        XCTAssertNil(source.endpoint)
+        var mirror = ServiceProfile.localQwen; mirror.baseURL = "https://mirror.example/mlx-community/"
+        XCTAssertEqual(try mirror.validated().localModelRepository().endpoint, "https://mirror.example")
+        var bare = ServiceProfile.localQwen; bare.baseURL = "https://huggingface.co"
+        XCTAssertThrowsError(try bare.validated())
+        // An HTTP request never exists for an on-device engine, with or without a key.
+        XCTAssertThrowsError(try SpeechClient().request(text: "测试", settings: settings(.localQwen), key: ""))
+        // Too long for one passage is rejected before the engine is touched.
+        XCTAssertThrowsError(try SpeechClient().preflight(text: String(repeating: "字", count: 401), settings: settings(.localQwen), key: ""))
+    }
+    @MainActor func testCatalogGainsLocalQwenOnce() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var old = ServiceCatalog(); old.builtinsRevision = 3; old.profiles.removeAll { $0.kind == .localQwen }
+        try JSONEncoder().encode(old).write(to: dir.appendingPathComponent("services.json"))
+        XCTAssertEqual(Studio(root: dir).catalog.profiles.filter { $0.kind == .localQwen }.count, 1)
+        let reopened = Studio(root: dir)
+        XCTAssertEqual(reopened.catalog.profiles.filter { $0.kind == .localQwen }.count, 1)
+        XCTAssertEqual(reopened.catalog.builtinsRevision, 4)
+        XCTAssertEqual(reopened.catalog.defaultID, old.defaultID)
+    }
     func testGeminiRequestFormats() throws {
         let client = SpeechClient()
         let request = try client.request(text: "逐字朗读。", settings: settings(), key: "fixture-key")
@@ -111,7 +159,7 @@ final class ServiceTests: XCTestCase {
         XCTAssertEqual(studio.project?.settings.resolvedService.model, "new-model")
         let restored = Studio(root: dir)
         XCTAssertEqual(restored.catalog.defaultID, "custom")
-        XCTAssertEqual(restored.catalog.profiles.count, 6)
+        XCTAssertEqual(restored.catalog.profiles.count, 7)
         let saved = try String(contentsOf: dir.appendingPathComponent("services.json"), encoding: .utf8)
         XCTAssertFalse(saved.contains("API Key"))
     }

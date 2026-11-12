@@ -82,6 +82,10 @@ enum ServicePreflight {
         if service.kind == .volcengine && service.model != "seed-tts-2.0" && project.settings.voice == "zh_female_vv_uranus_bigtts" { add("VV 默认音色搭配 2.0 资源；请核对当前资源与音色版本。", false) }
         if service.kind == .qwenTTS && !service.model.contains("instruct") { add("此 Qwen 标准模型不应用语速与表达要求。", false) }
         if service.kind == .volcengine && !project.settings.direction.isEmpty { add("火山引擎当前不发送表达要求。", false) }
+        if service.kind == .localQwen {
+            add("本机合成不计费；语速与表达要求以提示方式传给模型，效果为参考。首次生成需下载模型。", false)
+            if project.settings.contextHintEnabled == true { add("本机 Qwen3-TTS 不接收前后句语气提示；本次仍只生成目标句。", false) }
+        }
         if project.settings.contextHintEnabled == true && service.kind == .volcengine { add("当前火山引擎接口不接收前后句语气提示；本次仍只生成目标句。", false) }
         return result
     }

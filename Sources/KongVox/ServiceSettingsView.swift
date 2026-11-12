@@ -46,14 +46,15 @@ import AVFoundation
         do {
             let service = try value()
             let token = key.trimmingCharacters(in: .whitespacesAndNewlines)
-            let secret = hasRecovery ? "" : token.isEmpty && !removeKey ? try KeyStore.read(account: service.keyAccount) : token
-            guard hasRecovery || !secret.isEmpty else { throw VoxError(message: "请填写该服务的 API Key。") }
+            let needsKey = service.kind.engine.requiresKey
+            let secret = hasRecovery || !needsKey ? "" : token.isEmpty && !removeKey ? try KeyStore.read(account: service.keyAccount) : token
+            guard hasRecovery || !needsKey || !secret.isEmpty else { throw VoxError(message: "请填写该服务的 API Key。") }
             var settings = VoiceSettings(); settings.service = service; settings.voice = testVoice
             let text = testText
             // Validate before presenting a loading state or making a billable request.
-            if !hasRecovery { _ = try SpeechClient().request(text: text, settings: settings, key: secret) }
+            if !hasRecovery { try SpeechClient().preflight(text: text, settings: settings, key: secret) }
             let recovery = recoveryFile()
-            diagnostic = ""; testing = true; message = hasRecovery ? "正在恢复下载…" : "正在生成短句试听…"; player?.stop()
+            diagnostic = ""; testing = true; message = hasRecovery ? "正在恢复下载…" : needsKey ? "正在生成短句试听…" : "正在用本机模型生成试听；首次使用需下载模型（数 GB），请耐心等待…"; player?.stop()
             task = Task {
                 defer { testing = false; task = nil }
                 do {
@@ -63,7 +64,7 @@ import AVFoundation
                     player = try AVAudioPlayer(data: wav)
                     guard player?.play() == true else { throw VoxError(message: "音频已生成，但无法播放。") }
                     if let file = recovery { try? DownloadReceipt.clear(file) }
-                    message = "连接成功，正在试听。配置尚需点击保存。"
+                    message = needsKey ? "连接成功，正在试听。配置尚需点击保存。" : "本机合成成功，正在试听。配置尚需点击保存。"
                 } catch { diagnostic = ServiceFailure.report(error); message = Task.isCancelled ? "已取消试听。" : error.localizedDescription }
             }
         } catch { message = error.localizedDescription }
@@ -151,7 +152,7 @@ struct ServiceSettings: View {
         VStack(alignment: .leading, spacing: 12) {
             TextField("服务名称", text: $editor.profile.name)
             Text(editor.profile.kind.rawValue).font(.caption).foregroundStyle(.secondary)
-            Text("API 基础地址").font(.caption)
+            Text(editor.profile.kind == .localQwen ? "模型下载地址（Hugging Face 或镜像站 + 发布者）" : "API 基础地址").font(.caption)
             TextField("https://…/v1 或 …/v1beta", text: $editor.profile.baseURL)
             Text(editor.profile.kind == .volcengine ? "资源 ID（选择模型及计费方式）" : "模型名称").font(.caption)
             TextField("TTS 模型 ID", text: $editor.profile.model)
@@ -177,6 +178,9 @@ struct ServiceSettings: View {
                 Text(editor.profile.usesVolcLegacyAuth ? "当前鉴权：AppID + Access Token。切换 AppID 后需重新填写 Token。" : "当前鉴权：新版 API Key。").font(.caption).foregroundStyle(.secondary)
                 Text("支持语速设置；本版暂不发送表达指令。中途失败不会采用残缺音频，重试可能重新计费。").font(.caption).foregroundStyle(.secondary)
                 Link("打开官方接口文档", destination: URL(string: "https://www.volcengine.com/docs/6561/1598757")!)
+            } else if editor.profile.kind == .localQwen {
+                Text("在这台 Mac 上合成，不上传文稿、不计费、不需要密钥。首次使用会下载模型（数 GB）到 ~/.cache/huggingface，之后可离线使用。需要 Apple 芯片，合成时占用数 GB 内存。").font(.caption).foregroundStyle(.secondary)
+                Text("无法访问 Hugging Face 时，可把地址中的域名换成镜像站，路径保留发布者（如 /mlx-community）。语速与表达要求以提示方式传给模型，效果为参考；每段最多 \(LocalQwenEngine.requestLimit) 字，文稿自动按 300 字以内分段。").font(.caption).foregroundStyle(.secondary)
             } else if editor.profile.kind == .gemini {
                 Text("使用 Google AI Studio API Key；gen-lang-client-… 是项目 ID，不能用作密钥。模型可用性取决于你的账户。").font(.caption).foregroundStyle(.secondary)
             } else if editor.profile.kind == .qwenTTS {
@@ -190,9 +194,11 @@ struct ServiceSettings: View {
             } else {
                 Text("兼容 /audio/speech；需支持 24 kHz、单声道、16-bit PCM 或 WAV 返回。").font(.caption).foregroundStyle(.secondary)
             }
-            SecureField(editor.profile.usesVolcLegacyAuth ? "Access Token（留空保留当前 AppID 已存凭据）" : "API Key（留空保留当前地址已存密钥）", text: $editor.key).disabled(editor.removeKey)
-            Toggle("保存时清除这个地址的密钥", isOn: $editor.removeKey).font(.caption)
-            Text("密钥保存在钥匙串。更换地址后需重新输入对应密钥。").font(.caption2).foregroundStyle(.secondary)
+            if editor.profile.kind != .localQwen {
+                SecureField(editor.profile.usesVolcLegacyAuth ? "Access Token（留空保留当前 AppID 已存凭据）" : "API Key（留空保留当前地址已存密钥）", text: $editor.key).disabled(editor.removeKey)
+                Toggle("保存时清除这个地址的密钥", isOn: $editor.removeKey).font(.caption)
+                Text("密钥保存在钥匙串。更换地址后需重新输入对应密钥。").font(.caption2).foregroundStyle(.secondary)
+            }
             TextField("声音 ID，以逗号分隔", text: $editor.voicesText, axis: .vertical).lineLimit(2...4)
             HStack { Toggle("启用", isOn: $editor.profile.enabled); Toggle("设为新项目默认", isOn: $editor.makeDefault) }
         }
@@ -215,6 +221,7 @@ struct ServiceSettings: View {
         case .gemini: profile = .gemini
         case .cosyVoice: profile = .cosyVoice
         case .qwenTTS: profile = .qwenTTS
+        case .localQwen: profile = .localQwen
         case .openAI: profile = .openAI
         }
         profile.id = UUID().uuidString; profile.name = "新的 " + kind.rawValue + " 服务"

@@ -45,7 +45,7 @@ extension Studio {
                 for favorite in chosen where !hasVoiceSample(favorite, text: text) {
                     let service = favorite.settings.resolvedService
                     if keys[service.keyAccount] == nil { keys[service.keyAccount] = try keyProvider(service) }
-                    _ = try client.request(text: text, settings: favorite.settings, key: keys[service.keyAccount] ?? "")
+                    try client.preflight(text: text, settings: favorite.settings, key: keys[service.keyAccount] ?? "")
                 }
                 for favorite in chosen {
                     try Task.checkCancellation()
