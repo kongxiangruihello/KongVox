@@ -7,6 +7,8 @@
 - **限制**：需要 Apple 芯片和 macOS 14 或更高版本；合成时占用数 GB 内存，速度随机型而定（虚拟 M1 构建机上，模型加载后合成 5 秒音频约需 6–7 秒；真机未实测）。模型没有精确语速控制，语速和表达要求以提示方式传入，效果为参考；不使用前后句语气提示。每段最多 400 字，文稿自动按 300 字以内分段。
 - **服务层重构**：每种服务成为独立的引擎类型（`SpeechEngines.swift`），新增服务不再修改同一个函数。原有服务的请求内容和续传逻辑不变。
 - **构建方式变化**：含本机引擎的安装包必须用完整的 Xcode 构建（MLX 的 Metal 着色库只有 Xcode 能编译），`scripts/build-app.sh` 会自动选择。只有 Command Line Tools 时，脚本构建不含本机引擎的版本，其余功能照常，最低系统仍为 macOS 13。
+- **在线更新**：菜单「KongVox → 检查更新…」读取本仓库 GitHub 上的最新发布，下载、校验后替换当前应用并自动重新打开；启动时每天最多自动检查一次（可在更新窗口关闭），发现新版本时侧栏出现提示，不会自动安装。下载只接受本仓库发布页的安装包，并核对 GitHub 记录的 SHA-256 与应用签名。应用为 ad-hoc 签名，这些校验能防止下载损坏或被替换，但不能证明发布者身份。正在生成或导出时不能更新；需要能访问 GitHub。
+- **发布方式**：推送与 `version.env` 一致的标签（如 `v0.13.0`）后，CI 自动构建并发布 DMG 与 ZIP。
 - 自检命令：`KongVox.app/Contents/MacOS/KongVox --local-speech-selftest /tmp/test.wav`，不打开窗口，直接用本机引擎合成一段并报告耗时。
 
 依赖：[mlx-audio-swift](https://github.com/Blaizzy/mlx-audio-swift)（固定在已试听验证的提交）与 [mlx-swift](https://github.com/ml-explore/mlx-swift)。模型：[mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16)。

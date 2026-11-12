@@ -15,12 +15,16 @@ import SwiftUI
 }
 struct KongVoxApp: App {
     @StateObject private var studio = Studio()
+    @StateObject private var updater = AppUpdater()
     var body: some Scene {
         WindowGroup("KongVox") {
-            StudioView().environmentObject(studio).frame(minWidth: 1060, minHeight: 700)
+            StudioView().environmentObject(studio).environmentObject(updater).frame(minWidth: 1060, minHeight: 700)
         }
         .defaultSize(width: 1240, height: 820)
-        .commands { CommandGroup(replacing: .newItem) { Button("新建配音") { studio.newProject() }.keyboardShortcut("n").disabled(studio.isWorking) } }
+        .commands {
+            CommandGroup(replacing: .newItem) { Button("新建配音") { studio.newProject() }.keyboardShortcut("n").disabled(studio.isWorking) }
+            CommandGroup(after: .appInfo) { Button("检查更新…") { updater.check(manual: true) } }
+        }
     }
 }
 final class ViewState: ObservableObject {
@@ -42,6 +46,7 @@ final class ViewState: ObservableObject {
 }
 struct StudioView: View {
     @EnvironmentObject var studio: Studio
+    @EnvironmentObject var updater: AppUpdater
     @StateObject private var state = ViewState()
     var body: some View {
         NavigationSplitView {
@@ -58,6 +63,9 @@ struct StudioView: View {
                         .contextMenu { Button("删除项目…", role: .destructive) { state.deleteID = p.id } }
                     }
                 }.listStyle(.sidebar).disabled(studio.isWorking)
+                if let release = updater.availableRelease {
+                    Button { updater.showPanel = true } label: { Label("有新版本 \(release.version)", systemImage: "arrow.down.circle") }.foregroundStyle(.orange)
+                }
                 Button { state.showSettings = true } label: { Label("服务设置", systemImage: "key") }.disabled(studio.isWorking)
                 Button("成品交付检查") { state.exportFormat = "zip"; state.showDelivery = true }.disabled(studio.isWorking)
                 Button("项目版本与回滚") { state.showVersions = true }.disabled(studio.isWorking)
@@ -157,6 +165,8 @@ struct StudioView: View {
         .sheet(isPresented: $state.showTools) { LongFormWorkbench().environmentObject(studio) }
         .sheet(isPresented: $state.showReview) { GenerationReview().environmentObject(studio) }
         .sheet(isPresented: $state.showSettings) { ServiceSettings().environmentObject(studio) }
+        .sheet(isPresented: $updater.showPanel) { UpdateView().environmentObject(updater).environmentObject(studio) }
+        .task { updater.checkOnLaunch() }
         .onChange(of: studio.selected) { _ in studio.stop(); studio.findings = []; studio.qualitySummary = "尚未检查"; studio.clearSpeechFindings() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in studio.flushPendingSave() }
         .modifier(MaintenanceDialogs(state: state))
