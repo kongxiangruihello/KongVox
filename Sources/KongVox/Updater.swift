@@ -202,7 +202,15 @@ enum UpdateLogic {
                 helper.standardInput = FileHandle.nullDevice; helper.standardOutput = FileHandle.nullDevice; helper.standardError = FileHandle.nullDevice
                 try helper.run()
                 beforeQuit()
+                // AppKit refuses to quit while a sheet is attached to a window, and this runs from the update
+                // sheet itself: up to 0.14.0 the app therefore never quit and the update never completed.
+                // Close the sheet first, then quit; if something else still blocks quitting, exit directly —
+                // the pending saves were flushed just above, and the helper is waiting for this process to end.
+                showPanel = false
+                try? await Task.sleep(nanoseconds: 800_000_000)
                 NSApp.terminate(nil)
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                exit(0)
             } catch {
                 installTask = nil; downloadFraction = nil
                 // Cancelled by the user: go back to offering the same release.
