@@ -48,8 +48,12 @@ struct ServiceFailure: LocalizedError {
 struct DownloadReceipt: Codable {
     let url: URL
     static func audioFile(_ file: URL) -> URL { file.appendingPathExtension("wav") }
+    static func generatedPCM(_ file: URL) -> URL { file.appendingPathExtension("pcm") }
+    static func exists(_ file: URL) -> Bool {
+        [generatedPCM(file), file].contains { FileManager.default.fileExists(atPath: $0.path) }
+    }
     static func clear(_ file: URL) throws {
-        for url in [audioFile(file), file] where FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+        for url in [audioFile(file), file, generatedPCM(file)] where FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
     }
     func save(to file: URL) throws {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)

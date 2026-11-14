@@ -66,6 +66,64 @@ final class Version03Tests: XCTestCase {
         XCTAssertEqual(CosyProtocol.requests.filter { $0.httpMethod == "POST" }.count, 2)
         XCTAssertFalse(resumed.hasRecovery(segment))
     }
+    @MainActor func testChangedNeighbourDoesNotResumeOldSynthesis() async throws {
+        let dir = try temporary(); defer { try? FileManager.default.removeItem(at: dir) }
+        let client = CosyVoiceTests().client()
+        let studio = Studio(root: dir, client: client, keyProvider: { _ in "test" })
+        studio.selectService(ServiceProfile.cosyVoice.id)
+        studio.edit {
+            $0.settings.contextHintEnabled = true
+            $0.segments = [Segment(text: "第一段"), Segment(text: "旧邻段")]
+        }
+        let id = try XCTUnwrap(studio.project?.segments.first?.id)
+        CosyProtocol.requests = []; CosyProtocol.downloadStatus = 503
+        studio.generate(only: id); await studio.task?.value
+        XCTAssertTrue(studio.hasRecovery(try XCTUnwrap(studio.project?.segments.first)))
+
+        let reopened = Studio(root: dir, client: client, keyProvider: { _ in "test" })
+        reopened.edit { $0.segments[1].text = "新邻段" }
+        XCTAssertFalse(reopened.hasRecovery(try XCTUnwrap(reopened.project?.segments.first)))
+        CosyProtocol.downloadStatus = 200
+        reopened.generate(only: id); await reopened.task?.value
+        XCTAssertEqual(CosyProtocol.requests.filter { $0.httpMethod == "POST" }.count, 2)
+        XCTAssertNotNil(reopened.project?.segments.first?.current)
+    }
+
+    @MainActor func testSaveFailureRetainsAudioAcrossRestart() async throws {
+        let dir = try temporary(); defer { try? FileManager.default.removeItem(at: dir) }
+        let fm = FileManager.default
+        let client = CosyVoiceTests().client()
+        let studio = Studio(root: dir, client: client, keyProvider: { _ in "test" })
+        studio.selectService(ServiceProfile.cosyVoice.id)
+        studio.edit { $0.segments = [Segment(text: "第一段")] }
+        let project = try XCTUnwrap(studio.project)
+        let segment = try XCTUnwrap(project.segments.first)
+        let file = ProjectStore(root: dir).file(project.id)
+        let original = try Data(contentsOf: file)
+        try fm.removeItem(at: file)
+        try fm.createDirectory(at: file, withIntermediateDirectories: false)
+        CosyProtocol.requests = []; CosyProtocol.downloadStatus = 200
+        studio.generate(only: segment.id); await studio.task?.value
+        XCTAssertNil(studio.project?.segments.first?.current)
+        XCTAssertTrue(studio.hasRecovery(segment))
+        XCTAssertTrue(studio.status.contains("已保留合成音频"))
+        studio.generate(only: segment.id); await studio.task?.value
+        XCTAssertNil(studio.project?.segments.first?.current)
+        XCTAssertEqual(CosyProtocol.requests.count, 2)
+
+        try fm.removeItem(at: file)
+        try original.write(to: file)
+        let reopened = Studio(root: dir, client: client, keyProvider: { _ in
+            XCTFail("Cached audio must not read the key")
+            return ""
+        })
+        reopened.generate(only: segment.id); await reopened.task?.value
+        XCTAssertEqual(try reopened.currentURLs().count, 1)
+        XCTAssertEqual(CosyProtocol.requests.count, 2)
+        XCTAssertFalse(reopened.hasRecovery(segment))
+        XCTAssertNotNil(Studio(root: dir).project?.segments.first?.current)
+    }
+
     func testSubtitlesTimingAndValidation() throws {
         let dir = try temporary(); defer { try? FileManager.default.removeItem(at: dir) }
         let one = dir.appendingPathComponent("one.wav"), two = dir.appendingPathComponent("two.wav")

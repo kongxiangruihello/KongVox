@@ -282,15 +282,21 @@ import UniformTypeIdentifiers
         catch { self.error = "无法保存批量预算设置。" }
     }
     func recoveryFile(_ segment: Segment, project: Project) -> URL {
-        root.appendingPathComponent("Recovery").appendingPathComponent("\(project.id)-\(segment.id)-\(segment.fingerprint(project.settings)).json")
+        let context = project.contextFingerprint(for: segment.id).map { "-context-" + $0 } ?? ""
+        let fingerprint = segment.fingerprint(project.settings)
+        return root.appendingPathComponent("Recovery").appendingPathComponent("\(project.id)-\(segment.id)-\(fingerprint)\(context).json")
     }
     func hasRecovery(_ segment: Segment) -> Bool {
         guard let p = project else { return false }
-        return FileManager.default.fileExists(atPath: recoveryFile(segment, project: p).path)
+        return DownloadReceipt.exists(recoveryFile(segment, project: p))
     }
     func discardRecovery(_ segment: Segment) {
         guard !isWorking, let p = project else { return }
-        do { try DownloadReceipt.clear(recoveryFile(segment, project: p)); status = "已放弃该段下载缓存，下次生成会重新请求服务。" }
+        do {
+            try DownloadReceipt.clear(recoveryFile(segment, project: p))
+            usageCache = nil
+            status = "已放弃该段恢复缓存，下次会重新合成。"
+        }
         catch { self.error = "无法清除下载缓存，请检查本地文件权限。" }
     }
     func copyDiagnostic() {
@@ -306,7 +312,7 @@ import UniformTypeIdentifiers
         for segment in p.segments {
             let count = p.settings.reading(segment.spokenText).count; result.total += count
             if ready(segment, in: p) { result.reuse += count }
-            else if FileManager.default.fileExists(atPath: recoveryFile(segment, project: p).path) { result.recover += count }
+            else if DownloadReceipt.exists(recoveryFile(segment, project: p)) { result.recover += count }
             else { result.generate += count }
         }
         usageCache = result; return result
@@ -359,11 +365,11 @@ import UniformTypeIdentifiers
         progress = only == nil ? fullProgress : 0; diagnostic = ""
         setTaskState(snapshot.id, "生成中", "正在处理待更新内容")
         task = Task {
-            defer { busy = false; activeSegment = nil; activeProject = nil; pauseRequested = false; task = nil }
+            defer { usageCache = nil; busy = false; activeSegment = nil; activeProject = nil; pauseRequested = false; task = nil }
             var auditionTake: Take?
             var generationKey: String?
             do {
-                let fresh = pending.filter { !FileManager.default.fileExists(atPath: recoveryFile($0, project: snapshot).path) }
+                let fresh = pending.filter { !DownloadReceipt.exists(recoveryFile($0, project: snapshot)) }
                 if !fresh.isEmpty {
                     generationKey = try keyProvider(service)
                     for segment in fresh {
@@ -379,22 +385,40 @@ import UniformTypeIdentifiers
                     try Task.checkCancellation()
                     activeSegment = segment.id
                     let recovery = recoveryFile(segment, project: snapshot)
-                    let resume = FileManager.default.fileExists(atPath: recovery.path)
+                    let resume = DownloadReceipt.exists(recovery)
                     status = snapshot.isLongMode && only == nil
                         ? "\(resume ? "正在恢复全文" : "正在生成全文") · \(Int(progress * 100))%（剩余 \(pending.count - offset) 个处理单元）"
-                        : "\(resume ? "正在恢复下载" : "正在生成") \(offset + 1) / \(pending.count) 段…"
+                        : "\(resume ? "正在恢复音频" : "正在生成") \(offset + 1) / \(pending.count) 段…"
                     if !resume && generationKey == nil { generationKey = try keyProvider(service) }
                     let key = resume ? "" : generationKey ?? ""
-                    let pcm = try await client.generate(text: snapshot.settings.reading(segment.spokenText), settings: segment.effectiveSettings(snapshot.settings), key: key, recoveryFile: recovery, context: snapshot.context(for: segment.id))
+                    let cache = DownloadReceipt.generatedPCM(recovery)
+                    let pcm: Data
+                    if FileManager.default.fileExists(atPath: cache.path) {
+                        pcm = try Data(contentsOf: cache)
+                    } else {
+                        pcm = try await client.generate(text: snapshot.settings.reading(segment.spokenText), settings: segment.effectiveSettings(snapshot.settings), key: key, recoveryFile: recovery, context: snapshot.context(for: segment.id))
+                        try FileManager.default.createDirectory(at: cache.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try pcm.write(to: cache, options: .atomic)
+                    }
                     try Task.checkCancellation()
-                    let take = Take(file: "\(UUID().uuidString).wav", fingerprint: segment.fingerprint(snapshot.settings), service: service, settings: segment.effectiveSettings(snapshot.settings), spokenText: snapshot.settings.reading(segment.spokenText))
-                    try AudioFiles.writePCM(pcm, to: audioURL(take))
                     guard let pi = projects.firstIndex(where: { $0.id == snapshot.id }), let si = projects[pi].segments.firstIndex(where: { $0.id == segment.id }) else { return }
-                    projects[pi].segments[si].takes.insert(take, at: 0)
-                    projects[pi].segments[si].contextFingerprint = snapshot.contextFingerprint(for: segment.id)
-                    if !audition { projects[pi].segments[si].selectedTake = take.id }
+                    let take = Take(file: "\(UUID().uuidString).wav", fingerprint: segment.fingerprint(snapshot.settings), service: service, settings: segment.effectiveSettings(snapshot.settings), spokenText: snapshot.settings.reading(segment.spokenText))
+                    let audio = audioURL(take)
+                    try AudioFiles.writePCM(pcm, to: audio)
+                    var updated = projects[pi]
+                    updated.segments[si].takes.insert(take, at: 0)
+                    updated.segments[si].contextFingerprint = snapshot.contextFingerprint(for: segment.id)
+                    if !audition { updated.segments[si].selectedTake = take.id }
+                    do {
+                        try projectStore.saveProject(updated)
+                    } catch {
+                        try? FileManager.default.removeItem(at: audio)
+                        self.error = "项目保存失败：\(error.localizedDescription)"
+                        status = "已保留合成音频，修复存储问题后可继续保存。"
+                        return
+                    }
+                    projects[pi] = updated
                     auditionTake = take
-                    guard save() else { status = "保存失败，已停止后续生成。"; setTaskState(snapshot.id, "保存失败", status); return }
                     try? DownloadReceipt.clear(recovery)
                     progress = only == nil ? fullProgress : Double(offset + 1) / Double(pending.count)
                     if pauseRequested && offset + 1 < pending.count {

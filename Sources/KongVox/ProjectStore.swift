@@ -59,17 +59,20 @@ struct ProjectStore {
         return projects
     }
 
+    /// Atomically commits one project's metadata without touching the index or other projects.
+    mutating func saveProject(_ project: Project) throws {
+        let data = try Self.encoder().encode(project)
+        let destination = file(project.id)
+        if written[project.id] == data, FileManager.default.fileExists(atPath: destination.path) { return }
+        try data.write(to: destination, options: .atomic)
+        written[project.id] = data
+    }
+
     /// Writes the projects that changed, the order if it changed, and removes the files of projects no longer present.
     mutating func save(_ projects: [Project]) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
-        let encoder = Self.encoder()
-        for project in projects {
-            let data = try encoder.encode(project)
-            if written[project.id] == data, fm.fileExists(atPath: file(project.id).path) { continue }
-            try data.write(to: file(project.id), options: .atomic)
-            written[project.id] = data
-        }
+        for project in projects { try saveProject(project) }
         let ids = projects.map(\.id)
         if order != ids || !fm.fileExists(atPath: indexFile.path) {
             try JSONEncoder().encode(ids).write(to: indexFile, options: .atomic)
