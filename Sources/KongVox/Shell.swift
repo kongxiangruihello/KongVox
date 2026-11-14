@@ -100,8 +100,6 @@ private struct SidebarOrganization: Codable {
 
     var folders: [Folder] = []
     var membership: [UUID: UUID] = [:]
-    var projectsCollapsed = false
-    var ungroupedCollapsed = false
 }
 
 struct ProjectSidebar: View {
@@ -161,37 +159,26 @@ struct ProjectSidebar: View {
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Palette.hairline))
             projectControls
             List(selection: managing ? .constant(nil) : $studio.selected) {
-                if !organization.projectsCollapsed || !query.isEmpty || managing {
-                    ForEach(organization.folders) { folder in
-                        let projects = filtered.filter { organization.membership[$0.id] == folder.id }
-                        if query.isEmpty || !projects.isEmpty {
-                            Section {
-                                if !folder.collapsed || !query.isEmpty || managing { projectRows(projects) }
-                            } header: {
-                                groupHeader(folder.name, count: projects.count, collapsed: folder.collapsed) {
-                                    updateOrganization { value in
-                                        if let i = value.folders.firstIndex(where: { $0.id == folder.id }) {
-                                            value.folders[i].collapsed.toggle()
-                                        }
+                projectRows(filtered.filter { project in
+                    !organization.folders.contains { $0.id == organization.membership[project.id] }
+                })
+                ForEach(organization.folders) { folder in
+                    let projects = filtered.filter { organization.membership[$0.id] == folder.id }
+                    if query.isEmpty || !projects.isEmpty {
+                        Section {
+                            if !folder.collapsed || !query.isEmpty || managing { projectRows(projects, grouped: true) }
+                        } header: {
+                            groupHeader(folder.name, count: projects.count, collapsed: folder.collapsed) {
+                                updateOrganization { value in
+                                    if let i = value.folders.firstIndex(where: { $0.id == folder.id }) {
+                                        value.folders[i].collapsed.toggle()
                                     }
                                 }
-                                .contextMenu {
-                                    Button("在此分组新建项目…") { editName(.project(nil), folder: folder.id) }
-                                    Button("编辑分组…") { editName(.folder(folder.id), current: folder.name) }
-                                    Button("解散分组") { dissolve(folder.id) }
-                                }
                             }
-                        }
-                    }
-                    let ungrouped = filtered.filter { project in
-                        !organization.folders.contains { $0.id == organization.membership[project.id] }
-                    }
-                    if query.isEmpty || !ungrouped.isEmpty {
-                        Section {
-                            if !organization.ungroupedCollapsed || !query.isEmpty || managing { projectRows(ungrouped) }
-                        } header: {
-                            groupHeader("未分组", count: ungrouped.count, collapsed: organization.ungroupedCollapsed) {
-                                updateOrganization { $0.ungroupedCollapsed.toggle() }
+                            .contextMenu {
+                                Button("在此分组新建项目…") { editName(.project(nil), folder: folder.id) }
+                                Button("编辑分组…") { editName(.folder(folder.id), current: folder.name) }
+                                Button("解散分组") { dissolve(folder.id) }
                             }
                         }
                     }
@@ -237,7 +224,7 @@ struct ProjectSidebar: View {
                 HStack {
                     Spacer()
                     Button("取消") { editingName = false }.keyboardShortcut(.cancelAction)
-                    Button("保存", action: saveName).keyboardShortcut(.defaultAction)
+                    Button(editorActionTitle, action: saveName).keyboardShortcut(.defaultAction)
                         .disabled(!canSaveName)
                 }
             }
@@ -298,12 +285,7 @@ struct ProjectSidebar: View {
     private var projectControls: some View {
         VStack(spacing: 6) {
             HStack {
-                Button {
-                    updateOrganization { $0.projectsCollapsed.toggle() }
-                } label: {
-                    Label("项目", systemImage: organization.projectsCollapsed && query.isEmpty && !managing ? "chevron.right" : "chevron.down")
-                }
-                .disabled(!query.isEmpty || managing)
+                Text("项目").fontWeight(.semibold).foregroundStyle(.secondary)
                 Spacer()
                 Button { editName(.folder(nil)) } label: { Image(systemName: "folder.badge.plus") }
                     .help("新建分组").accessibilityLabel("新建分组")
@@ -342,7 +324,7 @@ struct ProjectSidebar: View {
         .disabled(!query.isEmpty || managing)
     }
 
-    private func projectRows(_ projects: [Project]) -> some View {
+    private func projectRows(_ projects: [Project], grouped: Bool = false) -> some View {
         ForEach(projects) { project in
             Group {
                 if managing {
@@ -358,7 +340,7 @@ struct ProjectSidebar: View {
                             Button("删除项目…", role: .destructive) { state.deleteID = project.id }
                         }
                 }
-            }.tag(project.id)
+            }.padding(.leading, grouped ? 16 : 0).tag(project.id)
         }
     }
 
@@ -375,7 +357,6 @@ struct ProjectSidebar: View {
         }
         Button("未分组") { updateOrganization { value in
             for id in ids { value.membership[id] = nil }
-            value.ungroupedCollapsed = false
         } }
     }
 
@@ -384,8 +365,17 @@ struct ProjectSidebar: View {
         return true
     }
 
+    private var editorActionTitle: String {
+        switch nameTarget {
+        case .narration, .project(nil), .folder(nil): return "创建"
+        default: return "保存"
+        }
+    }
+
     private var canSaveName: Bool {
-        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !studio.isWorking else { return false }
+        guard !studio.isWorking else { return false }
+        if case .project(nil) = nameTarget { return true }
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         if case .narration = nameTarget { return !narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         return true
     }
@@ -414,7 +404,11 @@ struct ProjectSidebar: View {
                 guard studio.renameProject(id, to: title) else { return }
                 placeProject(id)
             } else {
-                guard let id = studio.newProject(title: title) else { return }
+                guard let id = studio.newProject(title: title.isEmpty ? nil : title) else {
+                    nameError = studio.error ?? "无法保存项目，请检查项目存储是否可用。"
+                    studio.error = nil
+                    return
+                }
                 revealNewProject(id, step: .script)
             }
         case .folder(let id):
@@ -427,7 +421,6 @@ struct ProjectSidebar: View {
                     value.folders[index].name = title
                 } else {
                     value.folders.append(SidebarOrganization.Folder(name: title))
-                    value.projectsCollapsed = false
                 }
             }
         }
@@ -445,11 +438,8 @@ struct ProjectSidebar: View {
     private func placeProject(_ id: UUID) {
         updateOrganization { value in
             value.membership[id] = projectFolder
-            value.projectsCollapsed = false
             if let i = value.folders.firstIndex(where: { $0.id == projectFolder }) {
                 value.folders[i].collapsed = false
-            } else {
-                value.ungroupedCollapsed = false
             }
         }
     }
