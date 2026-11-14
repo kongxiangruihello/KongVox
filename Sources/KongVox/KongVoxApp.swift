@@ -60,6 +60,7 @@ final class ViewState: ObservableObject {
     @Published var step: WorkStep = .script
     @Published var search = ""
     @Published var sidebarPath = ""
+    @Published var reviewJump: UUID?
     @Published var focusManuscript: UUID?
     @Published var sidebarReveal = UUID()
 }

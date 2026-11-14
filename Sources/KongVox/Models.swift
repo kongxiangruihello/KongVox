@@ -78,6 +78,9 @@ struct Project: Codable, Identifiable {
     var lastGeneratedManuscript: String?
     var archivedSegments: [Segment]?
     var usesDictionarySnapshot: Bool?
+    var failedSegmentID: UUID?
+    var reviewNotes: [UUID: String]?
+    var completedReview: Set<UUID>?
     var taskState: String?
     var taskMessage: String?
     var normalizeVolume: Bool?
@@ -215,4 +218,20 @@ extension Project {
 struct VoxError: LocalizedError {
     var message: String
     var errorDescription: String? { message }
+}
+
+extension Project {
+    var exportSignature: String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        var snapshot = self
+        snapshot.failedSegmentID = nil
+        snapshot.reviewNotes = nil
+        snapshot.completedReview = nil
+        snapshot.taskState = nil
+        snapshot.taskMessage = nil
+        snapshot.versions = nil
+        let data = (try? encoder.encode(snapshot)) ?? Data()
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
 }

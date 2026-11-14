@@ -168,10 +168,10 @@ struct SegmentRepair: View {
                 let pcm = try AudioAssembly.prepare(Data(contentsOf: source), trimStart: false, trimEnd: false, normalize: true)
                 let preview = studio.root.appendingPathComponent("comparison-preview.wav")
                 try AudioFiles.writePCM(pcm, to: preview)
-                studio.play(preview, from: offset)
+                studio.play(preview, from: offset, label: take.id == segment?.selectedTake ? "A · 已采用版本" : "B · 候选版本")
             } catch { studio.error = error.localizedDescription; return }
         } else {
-            studio.play(source, from: offset)
+            studio.play(source, from: offset, label: take.id == segment?.selectedTake ? "A · 已采用版本" : "B · 候选版本")
         }
         comparisonTake = take.id
     }
@@ -222,7 +222,7 @@ struct SegmentRepair: View {
                         Button(comparisonTake == b.id ? "▶ B · 候选版本" : "B · 候选版本") { compare(b) }.keyboardShortcut("2", modifiers: [])
                         Button(studio.playing ? "暂停" : "播放") {
                             if comparisonTake != nil, studio.player != nil { studio.togglePause() } else { compare(a) }
-                        }.keyboardShortcut(.space, modifiers: [])
+                        }
                         Button("循环接缝") { comparisonTake = nil; studio.playSeam(after: segmentID) }
                             .disabled(p.segments.last?.id == segmentID)
                         Button("采用 B") { studio.adoptTake(segmentID: segmentID, takeID: b.id) }
@@ -256,7 +256,7 @@ struct SegmentRepair: View {
                                 Text(take.date.formatted(date: .abbreviated, time: .standard)).font(.caption)
                                 Spacer()
                                 if take.id == segment.selectedTake { Text("已采用").foregroundStyle(.green) }
-                                Button("试听") { studio.play(studio.audioURL(take)) }.disabled(studio.isWorking)
+                                Button("试听") { studio.play(studio.audioURL(take), label: take.id == segment.selectedTake ? "已采用版本" : "候选版本") }.disabled(studio.isWorking)
                                 Button("采用") { studio.adoptTake(segmentID: segmentID, takeID: take.id) }
                                     .disabled(studio.isWorking || dirty || !segment.matches(take, p.settings) || take.id == segment.selectedTake)
                             }

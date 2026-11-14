@@ -3,8 +3,52 @@ import SwiftUI
 extension Studio {
     func splitLocal(_ id: UUID) {
         guard !isWorking, var p = project else { return }
-        do { try p.splitForLocalRepair(id); edit { $0 = p }; status = "只拆分了所选段落，其他音频保留；请检查本次生成范围。" }
+        do { try p.splitForLocalRepair(id); applySegmentEdit(p); status = "只拆分了所选段落，其他音频保留；请检查本次生成范围。" }
         catch { self.error = error.localizedDescription }
+    }
+    func applySegmentEdit(_ updated: Project) {
+        guard !isWorking, let previous = project, previous.id == updated.id else { return }
+        previousSegmentEdit = previous
+        edit { $0 = updated }
+    }
+
+    func undoSegmentEdit() {
+        guard let previous = previousSegmentEdit, previous.id == selected, !isWorking else { return }
+        edit {
+            let existing = Set((previous.segments + (previous.archivedSegments ?? [])).map(\.id))
+            let newer = ($0.segments + ($0.archivedSegments ?? [])).filter { !existing.contains($0.id) }
+            $0 = previous
+            $0.archivedSegments = (previous.archivedSegments ?? []) + newer
+        }
+        previousSegmentEdit = nil
+    }
+
+    func previewSegmentEdit(_ id: UUID, merging: Bool, before target: UUID? = nil) throws -> Project {
+        guard var copy = project, !copy.isLongMode,
+              let source = copy.segments.firstIndex(where: { $0.id == id }) else {
+            throw VoxError(message: "请切换到逐段编辑后调整段落顺序。")
+        }
+        if merging {
+            guard source + 1 < copy.segments.count else { throw VoxError(message: "后面没有可合并的段落。") }
+            let left = copy.segments[source], right = copy.segments[source + 1]
+            let text = left.text + "\n" + right.text
+            guard left.pronunciation.isEmpty, right.pronunciation.isEmpty,
+                  left.speedOverride == nil, right.speedOverride == nil,
+                  left.pauseOverride == nil, right.pauseOverride == nil else {
+                throw VoxError(message: "两段中已有精修，请先处理精修设置。")
+            }
+            guard copy.settings.reading(text).count <= copy.chunkLimit else {
+                throw VoxError(message: "合并后超过当前服务的分段长度。")
+            }
+            copy.archivedSegments = (copy.archivedSegments ?? []) + [left, right]
+            copy.segments.replaceSubrange(source...source + 1, with: [Segment(text: text)])
+        } else if let target, target != id {
+            let item = copy.segments.remove(at: source)
+            guard let index = copy.segments.firstIndex(where: { $0.id == target }) else { return copy }
+            copy.segments.insert(item, at: index)
+        }
+        copy.longText = nil
+        return copy
     }
     func restoreContext() {
         guard !isWorking, var p = project else { return }
@@ -28,6 +72,7 @@ extension Studio {
                 let pcm = try await Task.detached { try SeamPreview.pcm(p, after: i, root: folder) }.value
                 try AudioFiles.writePCM(pcm, to: destination)
                 playRange(destination, start: 0, end: Double(pcm.count) / 48000, loop: true)
+                playbackLabel = "循环接缝"
                 status = "循环试听接缝前后各最多 3 秒，包含实际停顿与音量处理；点击停止结束。"
             } catch { self.error = error.localizedDescription }
         }

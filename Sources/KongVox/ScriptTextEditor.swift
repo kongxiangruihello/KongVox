@@ -14,6 +14,7 @@ struct ScriptTextEditor: NSViewRepresentable {
         guard let view = scroll.documentView as? NSTextView else { return scroll }
         view.font = .systemFont(ofSize: 16)
         view.isRichText = false
+        view.usesFindBar = true
         view.drawsBackground = false
         scroll.drawsBackground = false
         view.setAccessibilityLabel("完整文章编辑区")

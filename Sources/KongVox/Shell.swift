@@ -150,6 +150,7 @@ struct ProjectSidebar: View {
     @ObservedObject var state: ViewState
     @AppStorage("projectSidebarOrganization") private var savedOrganization = Data()
     @State private var managing = false
+    @State private var statusFilter = "全部"
     @State private var checked: Set<UUID> = []
     @State private var editingName = false
     @State private var name = ""
@@ -199,8 +200,17 @@ struct ProjectSidebar: View {
 
     private var query: String { state.search.trimmingCharacters(in: .whitespacesAndNewlines) }
     var filtered: [Project] {
-        query.isEmpty ? studio.projects : studio.projects.filter { ($0.title + " " + path(for: $0.id)).localizedCaseInsensitiveContains(query) }
+        studio.projects.filter { item in
+            guard query.isEmpty || (item.title + " " + path(for: item.id)).localizedCaseInsensitiveContains(query) else { return false }
+            switch statusFilter {
+            case "有失败": return studio.failedSegments[item.id] != nil || item.taskState?.contains("失败") == true
+            case "待生成": return studio.progressState(item) == .pending
+            case "待导出": return studio.progressState(item) == .ready && studio.lastDelivery(for: item.id)?.signature != item.exportSignature
+            default: return true
+            }
+        }
     }
+    private var browsingTree: Bool { query.isEmpty && statusFilter == "全部" && !managing }
     private var visibleIDs: Set<UUID> { Set(filtered.map(\.id)) }
     private var selectedIDs: Set<UUID> { checked.intersection(studio.projects.map(\.id)) }
     private func updateOrganization(_ change: (inout SidebarOrganization) -> Void) {
@@ -236,7 +246,7 @@ struct ProjectSidebar: View {
                             (organization.membership[item.id].flatMap { organization.parents?[$0] } ?? organization.legacyProjectID) == node.id
                         }.count, collapsed: node.collapsed) {
                             currentContainer = node.id; currentGroup = nil
-                            guard query.isEmpty, !managing else { return }
+                            guard browsingTree else { return }
                             updateOrganization { value in
                                 if let i = value.projects?.firstIndex(where: { $0.id == node.id }) { value.projects?[i].collapsed.toggle() }
                             }
@@ -252,13 +262,13 @@ struct ProjectSidebar: View {
                             Button("删除项目…", role: .destructive) { projectToDelete = node.id }
                                 .disabled(projectNodes.count == 1)
                         }
-                        if !node.collapsed || !query.isEmpty || managing {
+                        if !node.collapsed || !browsingTree {
                             ForEach(organization.folders.filter { organization.parents?[$0.id] == node.id }) { folder in
                                 let items = filtered.filter { organization.membership[$0.id] == folder.id }
-                                if query.isEmpty || !items.isEmpty {
+                                if browsingTree || !items.isEmpty {
                                     groupHeader(folder.name, count: items.count, collapsed: folder.collapsed, isFolder: true) {
                                         currentContainer = node.id; currentGroup = folder.id
-                                        guard query.isEmpty, !managing else { return }
+                                        guard browsingTree else { return }
                                         updateOrganization { value in
                                             if let i = value.folders.firstIndex(where: { $0.id == folder.id }) { value.folders[i].collapsed.toggle() }
                                         }
@@ -280,16 +290,16 @@ struct ProjectSidebar: View {
                                         Button("编辑分组…") { editName(.folder(folder.id), current: folder.name) }
                                         Button("解散分组") { dissolve(folder.id) }
                                     }
-                                    if !folder.collapsed || !query.isEmpty || managing { projectRows(items, grouped: true) }
+                                    if !folder.collapsed || !browsingTree { projectRows(items, grouped: true) }
                                 }
                             }
                             if node.id == organization.legacyProjectID {
                                 let loose = filtered.filter { organization.membership[$0.id] == nil }
                                 if !loose.isEmpty {
                                     groupHeader("未分组", count: loose.count, collapsed: ungroupedCollapsed, isFolder: true) {
-                                        if query.isEmpty && !managing { ungroupedCollapsed.toggle() }
+                                        if browsingTree { ungroupedCollapsed.toggle() }
                                     }.padding(.leading, 12)
-                                    if !ungroupedCollapsed || !query.isEmpty || managing { projectRows(loose, grouped: true) }
+                                    if !ungroupedCollapsed || !browsingTree { projectRows(loose, grouped: true) }
                                 }
                             }
                         }
@@ -320,6 +330,7 @@ struct ProjectSidebar: View {
                 updateOrganization { _ in }
             }
         }
+        .onChange(of: statusFilter) { _ in checked = [] }
         .onChange(of: state.search) { _ in if managing { checked = [] } }
         .onAppear { updateBreadcrumb(studio.selected) }
         .onChange(of: savedOrganization) { _ in updateBreadcrumb(studio.selected) }
@@ -519,6 +530,11 @@ struct ProjectSidebar: View {
                 Spacer()
                 Button { editName(.folder(nil)) } label: { Image(systemName: "folder.badge.plus") }
                     .help("新建分组").accessibilityLabel("新建分组")
+                Menu {
+                    Picker("配音状态", selection: $statusFilter) {
+                        ForEach(["全部", "有失败", "待生成", "待导出"], id: \.self) { Text($0) }
+                    }
+                } label: { Label(statusFilter == "全部" ? "筛选" : statusFilter, systemImage: "line.3.horizontal.decrease.circle") }
                 Button(managing ? "完成" : "多选") { managing.toggle(); checked = [] }
             }
             if managing {
@@ -543,7 +559,7 @@ struct ProjectSidebar: View {
     private func groupHeader(_ title: String, count: Int, collapsed: Bool, isFolder: Bool = false, toggle: @escaping () -> Void) -> some View {
         Button(action: toggle) {
             HStack {
-                Image(systemName: collapsed && query.isEmpty && !managing ? "chevron.right" : "chevron.down")
+                Image(systemName: collapsed && browsingTree ? "chevron.right" : "chevron.down")
                 if isFolder { Image(systemName: "folder").foregroundStyle(.secondary) }
                 Text(title).fontWeight(isFolder ? .medium : .semibold).lineLimit(1)
                 Spacer()
@@ -564,7 +580,7 @@ struct ProjectSidebar: View {
                 } else {
                     VStack(alignment: .leading) {
                         ProjectRow(project: project)
-                        if !query.isEmpty { Text(path(for: project.id)).font(.caption2).foregroundStyle(.secondary) }
+                        if !browsingTree { Text(path(for: project.id)).font(.caption2).foregroundStyle(.secondary) }
                     }
                         .draggable(project.id.uuidString)
                         .contextMenu {
@@ -864,7 +880,7 @@ struct ProjectWorkspace: View {
                 HStack {
                     Text("第 \(index + 1) 段生成未完成").foregroundStyle(.orange)
                     Spacer()
-                    Button("重试本段") { studio.generate(only: failed) }
+                    Button("定位失败段") { state.step = .review; state.reviewJump = failed }
                     Button("继续剩余段落") { studio.prepareReview(); state.showReview = true }
                     if !studio.diagnostic.isEmpty { Button("复制诊断") { studio.copyDiagnostic() } }
                 }.padding(10)
@@ -979,6 +995,8 @@ struct ScriptStep: View {
     @State private var showingDiff = false
     @State private var diff = [ManuscriptChange]()
     @State private var manuscriptJump: Int?
+    @State private var segmentEdit: Project?
+    @State private var confirmSegmentEdit = false
     @State private var find = ""
     @State private var replacement = ""
     private var matches: [String] {
@@ -1008,13 +1026,14 @@ struct ScriptStep: View {
                 Button { state.showBatch = true } label: { Label("导入文稿…", systemImage: "square.and.arrow.down") }
                     .help("读取 TXT、Markdown、Word 文件，每份文件建立一个项目")
                 Spacer()
-                if project.isLongMode { Button("查找与替换…") { showingReplace = true }.disabled(studio.isWorking) }
+                if project.isLongMode { Button("查找与替换…") { showingReplace = true }.keyboardShortcut("f", modifiers: [.command, .shift]).disabled(studio.isWorking) }
                 if let baseline = project.lastGeneratedManuscript, project.isLongMode {
                     Button("与上次生成对比…") {
                         diff = ManuscriptChange.compare(baseline, project.fullText)
                         showingDiff = true
                     }
                 }
+                if studio.previousSegmentEdit?.id == project.id { Button("撤销段落调整") { studio.undoSegmentEdit() } }
                 Text(progressText).font(.caption).foregroundStyle(.secondary)
             }
             if oversizedLines > 0 {
@@ -1022,6 +1041,25 @@ struct ScriptStep: View {
                     Text("\(oversizedLines) 行超过当前服务的 \(project.chunkLimit) 字分段上限。").foregroundStyle(.orange)
                     Button("预览分段…") { studio.prepareReview(); state.showReview = true }
                 }.font(.caption)
+            }
+            if project.isLongMode && !project.fullText.isEmpty {
+                DisclosureGroup("章节导航") {
+                    let chapters = project.chapters
+                    ScrollView {
+                        VStack(alignment: .leading) {
+                            ForEach(chapters) { chapter in
+                                let ids = Set(chapter.segmentIDs)
+                                let count = project.segments.filter { ids.contains($0.id) && studio.ready($0, in: project) }.count
+                                Button("\(chapter.title) · \(count)/\(ids.count) 段就绪") {
+                                    if let segment = project.segments.first(where: { $0.id == chapter.id }),
+                                       let range = project.fullText.range(of: segment.text) {
+                                        manuscriptJump = NSRange(range, in: project.fullText).location
+                                    }
+                                }.buttonStyle(.plain)
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }.frame(maxHeight: 120)
+                }
             }
             if project.isLongMode {
                 ScriptTextEditor(projectID: project.id, text: Binding(get: { project.fullText }, set: { text in
@@ -1044,6 +1082,17 @@ struct ScriptStep: View {
                     LazyVStack(spacing: 12) {
                         ForEach(Array(project.segments.enumerated()), id: \.element.id) { index, segment in
                             SegmentCard(index: index, segment: segment, settings: project.settings)
+                                .draggable(segment.id.uuidString)
+                                .dropDestination(for: String.self) { values, _ in
+                                    guard let id = values.first.flatMap(UUID.init(uuidString:)), id != segment.id,
+                                          project.segments.contains(where: { $0.id == id }) else { return false }
+                                    proposeSegmentEdit(id, merging: false, before: segment.id)
+                                    return true
+                                }
+                                .contextMenu {
+                                    Button("与下一段合并…") { proposeSegmentEdit(segment.id, merging: true) }
+                                        .disabled(index + 1 >= project.segments.count)
+                                }
                         }
                         VStack(alignment: .leading, spacing: 10) {
                             Text(project.segments.isEmpty ? "从一段文字开始" : "追加文稿").font(.headline)
@@ -1063,6 +1112,14 @@ struct ScriptStep: View {
         }
         .padding(.horizontal, 28).padding(.vertical, 18)
         .disabled(studio.isWorking)
+        .confirmationDialog("应用段落调整？", isPresented: $confirmSegmentEdit) {
+            Button("应用调整") { if let segmentEdit { studio.applySegmentEdit(segmentEdit) }; segmentEdit = nil }
+        } message: {
+            if let segmentEdit {
+                let reusable = segmentEdit.segments.filter { studio.ready($0, in: segmentEdit) }.count
+                Text("可复用 \(reusable) 段，待更新 \(segmentEdit.segments.count - reusable) 段。合并前的音频将保留，可撤销调整。")
+            }
+        }
         .sheet(isPresented: $showingDiff) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
@@ -1113,6 +1170,11 @@ struct ScriptStep: View {
         }
 
     }
+    private func proposeSegmentEdit(_ id: UUID, merging: Bool, before target: UUID? = nil) {
+        do { segmentEdit = try studio.previewSegmentEdit(id, merging: merging, before: target); confirmSegmentEdit = true }
+        catch { studio.error = error.localizedDescription }
+    }
+
     func replaceAll(preview: Bool = false) {
         guard !find.isEmpty, studio.selected == project.id, !studio.isWorking else { return }
         let old = project.fullText
@@ -1232,42 +1294,68 @@ struct ReviewStep: View {
     @EnvironmentObject var studio: Studio
     @ObservedObject var state: ViewState
     let project: Project
+    @AppStorage("KongVox.reviewBookmarks") private var bookmarks = ""
+    private var checklist: [Segment] {
+        let marked = Set(bookmarks.split(separator: ",").map(String.init))
+        return project.segments.filter {
+            marked.contains($0.id.uuidString) || studio.hasFinding($0.id) || project.reviewNotes?[$0.id] != nil
+        }
+    }
     var stale: Bool { project.isLongMode && project.needsLongPreparation }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if !studio.fullAudioReady {
-                if project.fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Notice(icon: "doc.text", text: "先写入或导入文稿，再生成配音。", color: .secondary)
-                    Button("去写文稿") { state.step = .script }
-                } else {
-                    Notice(icon: "waveform", text: "配音还未就绪。生成后可逐段校对和试听。", color: Palette.warn)
+            if project.segments.isEmpty {
+                Notice(icon: "doc.text", text: "先写入或导入文稿，再准备配音段落。", color: .secondary)
+                Button("去写文稿") { state.step = .script }
+                Spacer()
+            } else {
+                if !studio.fullAudioReady {
+                    Notice(icon: "waveform", text: "可试听已有音频。待更新段落需补齐后才能导出全文。", color: Palette.warn)
                 }
-                Spacer()
-            } else {
-            HStack(spacing: 10) {
-                Text(studio.fullAudioReady ? "点击任一段，从该处播放。" : "生成全文后才能逐段试听。")
-                    .font(.callout).foregroundStyle(.secondary)
-                Spacer()
-                Button("逐句精修…") { state.showPrecision = true }.help("逐句填写读法、语速和句后停顿")
-                Button("复听与版本对比…") { state.showFinishedReview = true }.help("跟随文稿播放，修复读音并比较新旧版本")
-                Button("章节与词典…") { state.showTools = true }.help("按章生成和导出、发音词典、任务状态")
-            }
-            .disabled(studio.isWorking)
-            if stale {
-                Notice(icon: "exclamationmark.circle", text: "文稿在生成后有改动。回到「文稿」或点击下方「生成全文」更新后再校对。", color: Palette.warn)
-                Spacer()
-            } else if project.segments.isEmpty {
-                Notice(icon: "text.alignleft", text: "还没有文稿。先在「文稿」中写入或导入。", color: .secondary)
-                Spacer()
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(Array(project.segments.enumerated()), id: \.element.id) { index, segment in
-                            ReviewRow(index: index, segment: segment, project: project)
+                HStack {
+                    Button("逐句精修…") { state.showPrecision = true }
+                    Button("复听与版本对比…") { state.showFinishedReview = true }
+                    Button("章节与词典…") { state.showTools = true }
+                }.disabled(studio.isWorking)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 8) {
+                            DisclosureGroup("校对清单 · \(checklist.count) 条") {
+                                ForEach(checklist) { segment in
+                                    VStack(alignment: .leading) {
+                                        Button(String(segment.text.prefix(50))) { proxy.scrollTo(segment.id, anchor: .center) }
+                                        ForEach(studio.findings.filter { $0.segmentID == segment.id }) { item in
+                                            Button(item.message) { studio.playFinding(item) }
+                                        }
+                                        ForEach(studio.speechFindings(for: segment.id)) { item in
+                                            Button(item.message) { studio.playSpeechFinding(item) }
+                                        }
+                                        if let note = project.reviewNotes?[segment.id] { Text(note).font(.caption) }
+                                        Toggle("已处理", isOn: Binding(get: { project.completedReview?.contains(segment.id) == true }, set: { done in
+                                            studio.edit { p in
+                                                var ids = p.completedReview ?? []
+                                                if done { ids.insert(segment.id) } else { ids.remove(segment.id) }
+                                                p.completedReview = ids
+                                            }
+                                        }))
+                                    }.frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                            DisclosureGroup("章节导航") {
+                                ForEach(project.chapters) { chapter in
+                                    let ids = Set(chapter.segmentIDs)
+                                    let ready = project.segments.filter { ids.contains($0.id) && studio.ready($0, in: project) }.count
+                                    Button("\(chapter.title) · \(ready)/\(ids.count) 段就绪") { proxy.scrollTo(chapter.id, anchor: .top) }
+                                }
+                            }
+                            ForEach(Array(project.segments.enumerated()), id: \.element.id) { index, segment in
+                                ReviewRow(index: index, segment: segment, project: project).id(segment.id)
+                            }
                         }
                     }
+                    .onAppear { if let id = state.reviewJump { proxy.scrollTo(id, anchor: .center) } }
+                    .onChange(of: state.reviewJump) { if let id = $0 { proxy.scrollTo(id, anchor: .center) } }
                 }
-            }
             }
         }
         .padding(.horizontal, 28).padding(.vertical, 18)
@@ -1275,6 +1363,7 @@ struct ReviewStep: View {
 }
 
 struct ReviewRow: View {
+    @State private var confirmRetry = false
     @EnvironmentObject var studio: Studio
     let index: Int
     let segment: Segment
@@ -1283,7 +1372,13 @@ struct ReviewRow: View {
         let ready = studio.ready(segment, in: project)
         let flagged = studio.hasFinding(segment.id)
         let playing = studio.readingSegment == segment.id
-        Button { studio.playAll(from: segment.id) } label: {
+        VStack(alignment: .leading) {
+        Button {
+            if studio.fullAudioReady { studio.playAll(from: segment.id) }
+            else if let take = segment.current {
+                studio.play(studio.audioURL(take), label: "第 \(index + 1) 段 · 已采用版本")
+            }
+        } label: {
             HStack(alignment: .top, spacing: 14) {
                 Text(String(format: "%02d", index + 1)).font(.caption.monospacedDigit()).foregroundStyle(.secondary).padding(.top, 3)
                 Text(segment.text).font(.system(size: 14)).lineSpacing(5).multilineTextAlignment(.leading)
@@ -1299,7 +1394,28 @@ struct ReviewRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(!studio.fullAudioReady || studio.isWorking)
+        .disabled(studio.isWorking || !(segment.current.map { FileManager.default.fileExists(atPath: studio.audioURL($0).path) } ?? false))
+        DisclosureGroup("校对备注") {
+            TextField("填写备注", text: Binding(get: { project.reviewNotes?[segment.id] ?? "" }, set: { note in
+                studio.editLive { p in
+                    var notes = p.reviewNotes ?? [:]
+                    notes[segment.id] = note.isEmpty ? nil : note
+                    p.reviewNotes = notes
+                }
+            }))
+        }.font(.caption).disabled(studio.isWorking)
+        if studio.failedSegments[project.id] == segment.id {
+            let receipt = studio.recoveryFile(segment, project: project)
+            let recover = DownloadReceipt.exists(receipt)
+            Text(project.taskMessage ?? "本段生成失败。").font(.caption).foregroundStyle(.orange)
+            Button(recover ? "继续恢复音频" : "重新合成…") {
+                if recover { studio.generate(only: segment.id) } else { confirmRetry = true }
+            }.disabled(studio.isWorking)
+        }
+        }
+        .confirmationDialog("重新合成本段？", isPresented: $confirmRetry) {
+            Button("重新合成") { studio.generate(only: segment.id) }
+        } message: { Text("云端服务可能再次计费。") }
     }
 }
 
@@ -1513,6 +1629,7 @@ struct WorkspaceFooter: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 LocalModelProgressView()
+                if !studio.playbackLabel.isEmpty { Text(studio.playbackLabel).font(.caption.bold()) }
                 Text(textEmpty && !studio.isWorking ? "写入或导入文稿后即可生成。" : studio.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 if studio.isWorking { ProgressView(value: studio.progress).frame(width: 180) }
                 if let active = studio.activeSegment, let index = project.segments.firstIndex(where: { $0.id == active }) {

@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import UniformTypeIdentifiers
 
 @MainActor final class ServiceEditor: ObservableObject {
     @Published var profile = ServiceProfile.gemini
@@ -60,7 +61,14 @@ import AVFoundation
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [launchScript]
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        let errors = LocalEngineLog()
+        errorPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty { handle.readabilityHandler = nil }
+            else { errors.append(data) }
+        }
         do {
             if Self.engineProcess?.isRunning != true {
                 try process.run()
@@ -71,7 +79,14 @@ import AVFoundation
             for _ in 0..<30 {
                 if await localServiceReady() { localStatus = "本机服务已可用（\(Int(Date().timeIntervalSince(started))) 秒）。"; return }
                 if let running = Self.engineProcess, !running.isRunning {
-                    localStatus = "启动脚本已退出（代码 \(running.terminationStatus)）。请在终端运行同一脚本查看详情。"
+                    let output = errors.text.lowercased()
+                    if output.contains("address already in use") || output.contains("errno 48") {
+                        localStatus = "端口被占用。请停止占用端口的服务，或修改启动脚本和服务地址。"
+                    } else if output.contains("checkpoint") || output.contains("safetensors") || output.contains("weights") {
+                        localStatus = "模型加载失败。请检查权重文件是否齐全，以及启动脚本里的路径。"
+                    } else {
+                        localStatus = "启动脚本已退出（代码 \(running.terminationStatus)）。请在终端运行脚本查看详情。"
+                    }
                     return
                 }
                 try await Task.sleep(nanoseconds: 1_000_000_000)
@@ -327,6 +342,11 @@ struct ServiceSettings: View {
                     }.disabled(editor.launching || editor.testing)
                 }
                 Text(editor.localStatus).font(.caption)
+                Button("选择参考音频…") {
+                    let panel = NSOpenPanel()
+                    panel.allowedContentTypes = [.audio]
+                    if panel.runModal() == .OK { editor.profile.referenceAudioPath = panel.url?.path }
+                }
                 TextField("参考音频绝对路径", text: Binding(get: { editor.profile.referenceAudioPath ?? "" }, set: { editor.profile.referenceAudioPath = $0 }))
                 TextField("参考音频对应的中文文稿", text: Binding(get: { editor.profile.referenceTranscript ?? "" }, set: { editor.profile.referenceTranscript = $0 }))
                 Text("先在本机启动 GPT-SoVITS API v2，再点击试听。每个服务配置使用一份参考音频。").font(.caption).foregroundStyle(.secondary)
@@ -386,11 +406,39 @@ struct ServiceSettings: View {
     func save() {
         do {
             let profile = try editor.value()
+            if profile.kind == .volcengine && profile.model != "seed-tts-2.0" && profile.voices.contains(ServiceProfile.volcVVVoice) {
+                throw VoxError(message: "Vivi 2.0 音色需要使用 seed-tts-2.0，请调整资源或音色。")
+            }
+            if profile.kind == .gptSoVITS {
+                let path = profile.referenceAudioPath ?? ""
+                var directory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: path, isDirectory: &directory), !directory.boolValue,
+                      FileManager.default.isReadableFile(atPath: path) else {
+                    throw VoxError(message: "无法读取参考音频，请重新选择文件。")
+                }
+            }
             let token = editor.key.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !token.hasPrefix("gen-lang-client-") else { throw VoxError(message: "你填写的是 Google 项目 ID，请改填 API Key。") }
             try studio.saveService(profile, key: editor.removeKey ? "" : token.isEmpty ? nil : token, makeDefault: editor.makeDefault)
             editor.load(profile, defaultID: studio.catalog.defaultID)
             editor.message = "已保存。现有项目可在声音工作台选择此服务或应用最新配置。"
         } catch { editor.message = error.localizedDescription }
+    }
+}
+
+
+private final class LocalEngineLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+    func append(_ bytes: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        data.append(bytes)
+        if data.count > 16_384 { data = Data(data.suffix(16_384)) }
+    }
+    var text: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return String(decoding: data, as: UTF8.self)
     }
 }

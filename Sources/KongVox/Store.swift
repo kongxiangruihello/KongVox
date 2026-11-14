@@ -16,6 +16,8 @@ import UniformTypeIdentifiers
     @Published var activeProject: UUID?
     @Published var catalog = ServiceCatalog()
     @Published var batchHistory: [BatchRun] = []
+    var previousSegmentEdit: Project?
+    @Published var playbackLabel = ""
     @Published var failedSegments: [UUID: UUID] = [:]
     @Published var trashedProjects: [Project] = []
     @Published var projects: [Project] = [] { didSet { usageCache = nil } }
@@ -132,6 +134,7 @@ import UniformTypeIdentifiers
         }
         migrateVersionsOutOfProjects()
         selected = projects.first?.id
+        failedSegments = Dictionary(uniqueKeysWithValues: projects.compactMap { p in p.failedSegmentID.map { (p.id, $0) } })
         loadTrash()
         loadBatchHistory()
     }
@@ -295,6 +298,7 @@ import UniformTypeIdentifiers
         copy.id = UUID()
         copy.title += " 副本"
         copy.versions = nil
+        copy.failedSegmentID = nil
         copy.taskState = nil
         copy.taskMessage = nil
         if !includeAudio {
@@ -484,6 +488,7 @@ import UniformTypeIdentifiers
                     updated.segments[si].takes.insert(take, at: 0)
                     updated.segments[si].contextFingerprint = snapshot.contextFingerprint(for: segment.id)
                     if !audition { updated.segments[si].selectedTake = take.id }
+                    if updated.failedSegmentID == segment.id { updated.failedSegmentID = nil }
                     do {
                         try projectStore.saveProject(updated)
                     } catch {
@@ -504,7 +509,10 @@ import UniformTypeIdentifiers
                     }
                 } catch {
                     if Task.isCancelled { status = "已取消，完成的段落已保存。"; setTaskState(snapshot.id, "已暂停", status) }
-                    else { failedSegments[snapshot.id] = segment.id; diagnostic = ServiceFailure.report(error); self.error = error.localizedDescription; status = "生成已暂停，点击生成即可继续未完成段落。"; setTaskState(snapshot.id, "失败待继续", diagnostic) }
+                    else {
+                        failedSegments[snapshot.id] = segment.id
+                        if let i = projects.firstIndex(where: { $0.id == snapshot.id }) { projects[i].failedSegmentID = segment.id }
+                        diagnostic = ServiceFailure.report(error); self.error = error.localizedDescription; status = "生成已暂停，点击生成即可继续未完成段落。"; setTaskState(snapshot.id, "失败待继续", diagnostic) }
                     return
                 }
             }
@@ -515,7 +523,7 @@ import UniformTypeIdentifiers
             setTaskState(snapshot.id, fullAudioReady ? "已完成" : "待继续", fullAudioReady ? "全部音频已保存" : "部分内容已保存，可继续生成剩余内容")
             if only == nil, fullAudioReady, notificationsEnabled { CompletionNotice.shared.send() }
             if audition, let take = auditionTake {
-                play(audioURL(take)); status = "新版本已保存，请对比试听后选择采用。"
+                play(audioURL(take), label: "候选版本"); status = "新版本已保存，请对比试听后选择采用。"
             } else if only != nil, let updated = project?.segments.first(where: { $0.id == only }), let take = updated.current {
                 if opening { playOpening(audioURL(take)) } else { play(audioURL(take)) }
             }
@@ -600,12 +608,12 @@ import UniformTypeIdentifiers
         status = "已采用所选版本，请重新检查成品。"
     }
     func cancel() { task?.cancel() }
-    func stop() { rememberPlayback(); playbackRange = nil; repeatRange = false; playbackCues = []; readingSegment = nil; playbackProject = nil; player?.stop(); player = nil; playing = false; playbackTime = 0; playbackDuration = 0; playbackTimer?.invalidate(); playbackTimer = nil }
+    func stop() { rememberPlayback(); playbackLabel = ""; playbackRange = nil; repeatRange = false; playbackCues = []; readingSegment = nil; playbackProject = nil; player?.stop(); player = nil; playing = false; playbackTime = 0; playbackDuration = 0; playbackTimer?.invalidate(); playbackTimer = nil }
     func togglePause() {
         guard let player else { return }
         if player.isPlaying { player.pause(); playing = false } else { if let range = playbackRange, player.currentTime >= range.upperBound { player.currentTime = range.lowerBound } else if player.currentTime >= player.duration { player.currentTime = 0 }; playing = player.play() }
     }
-    func play(_ url: URL, cues: [PlaybackCue] = [], projectID: UUID? = nil, from seconds: Double = 0) {
+    func play(_ url: URL, cues: [PlaybackCue] = [], projectID: UUID? = nil, from seconds: Double = 0, label: String = "片段试听") {
         stop()
         do {
             player = try AVAudioPlayer(contentsOf: url)
@@ -613,6 +621,7 @@ import UniformTypeIdentifiers
             guard player?.play() == true else { throw VoxError(message: "无法播放音频。") }
             playbackCues = cues; playbackProject = projectID; readingSegment = PlaybackTimeline.current(player?.currentTime ?? 0, cues: cues)
             playbackTime = player?.currentTime ?? 0
+            playbackLabel = label
             playing = true; playbackDuration = player?.duration ?? 0
             playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
                 // Read the weak capture here, not inside the Task: Swift 5.10 rejects referencing a captured
@@ -689,7 +698,7 @@ import UniformTypeIdentifiers
                        PlaybackTimeline.excerpt(excerpt, duration: duration) == nil {
                         throw VoxError(message: "试听范围超出成品时长。")
                     }
-                    play(preview, cues: cues, projectID: snapshot.id, from: excerpt?.lowerBound ?? start)
+                    play(preview, cues: cues, projectID: snapshot.id, from: excerpt?.lowerBound ?? start, label: excerpt == nil ? "全文成品" : "成品区间试听")
                     if let excerpt { playExcerpt(excerpt, loop: loop) }
                     else { status = "正在试听完整配音。" }
                 } catch { self.error = error.localizedDescription }
@@ -705,6 +714,7 @@ import UniformTypeIdentifiers
         playbackRange = range
         repeatRange = loop
         seek(range.lowerBound)
+        playbackLabel = loop ? "成品区间循环" : "成品区间试听"
         if !playing { togglePause() }
         status = "试听 \(Self.timeLabel(range.lowerBound))–\(Self.timeLabel(range.upperBound))" + (loop ? " · 循环" : "")
     }
@@ -715,13 +725,15 @@ import UniformTypeIdentifiers
     struct LastDelivery: Codable {
         let url: URL
         let format: String
+        var date: Date?
+        var signature: String?
     }
     func lastDelivery(for id: UUID) -> LastDelivery? {
         guard let data = UserDefaults.standard.data(forKey: "KongVox.delivery." + id.uuidString) else { return nil }
         return try? JSONDecoder().decode(LastDelivery.self, from: data)
     }
     func rememberDelivery(_ url: URL, format: String, projectID: UUID) {
-        if let data = try? JSONEncoder().encode(LastDelivery(url: url, format: format)) {
+        if let data = try? JSONEncoder().encode(LastDelivery(url: url, format: format, date: Date(), signature: projects.first { $0.id == projectID }?.exportSignature)) {
             UserDefaults.standard.set(data, forKey: "KongVox.delivery." + projectID.uuidString)
         }
     }

@@ -56,9 +56,13 @@ final class LongDocumentTests: XCTestCase {
         XCTAssertEqual(studio.project?.fullText, article)
         XCTAssertEqual(studio.project?.segments.filter { $0.current != nil }.count, 1)
         XCTAssertThrowsError(try studio.currentURLs())
+        let failed = try XCTUnwrap(studio.project?.segments.dropFirst().first?.id)
         let resumed = Studio(root: dir, client: client, keyProvider: { _ in "fixture" })
+        XCTAssertEqual(resumed.project?.failedSegmentID, failed)
+        XCTAssertEqual(resumed.selected.flatMap { resumed.failedSegments[$0] }, failed)
         MockProtocol.count = 0; MockProtocol.failOnRequest = nil
         resumed.generate(); await resumed.task?.value
+        XCTAssertNil(resumed.project?.failedSegmentID)
         let urls = try resumed.currentURLs()
         XCTAssertEqual(MockProtocol.count, urls.count - 1)
         XCTAssertTrue(urls.count > 1)
@@ -66,7 +70,10 @@ final class LongDocumentTests: XCTestCase {
         let output = dir.appendingPathComponent("full.wav")
         try AudioFiles.merge(urls, pause: 0, to: output)
         XCTAssertEqual(try AudioFiles.extractPCM(Data(contentsOf: output)).count, urls.count * 4800)
+        resumed.rememberDelivery(output, format: "wav", projectID: resumed.selected!)
+        XCTAssertEqual(resumed.lastDelivery(for: resumed.selected!)?.signature, resumed.project?.exportSignature)
         resumed.edit { $0.longText = article + "修改。" }
+        XCTAssertNotEqual(resumed.lastDelivery(for: resumed.selected!)?.signature, resumed.project?.exportSignature)
         XCTAssertFalse(resumed.fullAudioReady)
         XCTAssertThrowsError(try resumed.currentURLs())
         resumed.setLongMode(false)
