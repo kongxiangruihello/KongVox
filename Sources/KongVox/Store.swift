@@ -242,6 +242,17 @@ import UniformTypeIdentifiers
         clearSpeechFindings("内容已改变，请重新核对")
         return true
     }
+    func renameProject(_ id: UUID, to title: String) {
+        guard !isWorking, storageAvailable, let index = projects.firstIndex(where: { $0.id == id }) else { return }
+        var updated = projects[index]
+        updated.title = title
+        do {
+            try projectStore.saveProject(updated)
+            projects[index] = updated
+        } catch {
+            self.error = "项目重命名失败：\(error.localizedDescription)"
+        }
+    }
     func newProject() {
         guard !isWorking else { return }
         stop()

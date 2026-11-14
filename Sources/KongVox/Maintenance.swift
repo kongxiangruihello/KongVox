@@ -77,20 +77,39 @@ extension Studio {
     }
     /// Removes a project, its queue entry, version snapshots and download receipts. Audio files stay until cleanup.
     func deleteProject(_ id: UUID) {
-        guard !isWorking, storageAvailable, let index = projects.firstIndex(where: { $0.id == id }) else { return }
+        deleteProjects([id])
+    }
+
+    @discardableResult func deleteProjects(_ ids: Set<UUID>) -> Bool {
+        guard !isWorking, storageAvailable else { return false }
+        let removed = projects.filter { ids.contains($0.id) }
+        guard !removed.isEmpty else { return false }
         stop()
         let oldProjects = projects, oldSelected = selected
-        let removed = projects.remove(at: index)
+        let index = projects.firstIndex { $0.id == selected } ?? 0
+        projects.removeAll { ids.contains($0.id) }
         if projects.isEmpty { projects = [makeProject()] }
-        if selected == id { selected = projects[min(index, projects.count - 1)].id }
-        guard save() else { projects = oldProjects; selected = oldSelected; return }
-        if queue.contains(where: { $0.projectID == id }) { queue.removeAll { $0.projectID == id }; saveQueue() }
-        try? writeVersions([], for: id)
+        if let selected, ids.contains(selected) {
+            self.selected = projects[min(index, projects.count - 1)].id
+        }
+        guard save() else { projects = oldProjects; selected = oldSelected; return false }
+        if queue.contains(where: { ids.contains($0.projectID) }) {
+            queue.removeAll { ids.contains($0.projectID) }
+            saveQueue()
+        }
+        for project in removed { try? writeVersions([], for: project.id) }
         let recovery = root.appendingPathComponent("Recovery")
         if let receipts = try? FileManager.default.contentsOfDirectory(at: recovery, includingPropertiesForKeys: nil) {
-            for file in receipts where file.lastPathComponent.hasPrefix(id.uuidString + "-") { try? FileManager.default.removeItem(at: file) }
+            for file in receipts {
+                let prefix = String(file.lastPathComponent.prefix(36))
+                if let id = UUID(uuidString: prefix), ids.contains(id), file.lastPathComponent.dropFirst(36).hasPrefix("-") {
+                    try? FileManager.default.removeItem(at: file)
+                }
+            }
         }
         findings = []; qualitySummary = "尚未检查"
-        status = "已删除「\(removed.title)」。音频文件暂时保留，可用「清理未引用音频」释放空间。"
+        let summary = removed.count == 1 ? "「\(removed[0].title)」" : "\(removed.count) 个项目"
+        status = "已删除\(summary)。音频文件暂时保留，可用「清理未引用音频」释放空间。"
+        return true
     }
 }

@@ -11,6 +11,25 @@ final class ProjectStoreTests: XCTestCase {
     func project(_ title: String) -> Project { var p = Project(); p.title = title; p.longText = "正文 " + title; return p }
     func modified(_ url: URL) throws -> Date { try XCTUnwrap(FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date) }
 
+    @MainActor func testSidebarRenameAndDeleteProjects() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let studio = Studio(root: root)
+        studio.newProject()
+        studio.newProject()
+        let retained = try XCTUnwrap(studio.projects.last)
+        let deleted = Set(studio.projects.dropLast().map(\.id))
+        studio.renameProject(retained.id, to: "保留项目")
+        XCTAssertTrue(studio.deleteProjects(deleted))
+        XCTAssertEqual(studio.selected, retained.id)
+        let reopened = Studio(root: root)
+        XCTAssertEqual(reopened.projects.map(\.id), [retained.id])
+        XCTAssertEqual(reopened.project?.title, "保留项目")
+        XCTAssertTrue(reopened.deleteProjects([retained.id]))
+        XCTAssertEqual(reopened.projects.count, 1)
+        XCTAssertNotEqual(reopened.selected, retained.id)
+        XCTAssertEqual(Studio(root: root).selected, reopened.selected)
+    }
+
     func testLegacyFileMigratesOnceAndIsKeptAsBackup() throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let legacy = [project("甲"), project("乙"), project("丙")]

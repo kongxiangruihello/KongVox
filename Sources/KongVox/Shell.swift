@@ -91,14 +91,51 @@ struct StudioView: View {
 
 // MARK: Sidebar
 
+private struct SidebarOrganization: Codable {
+    struct Folder: Codable, Identifiable {
+        var id = UUID()
+        var name: String
+        var collapsed = false
+    }
+
+    var folders: [Folder] = []
+    var membership: [UUID: UUID] = [:]
+    var projectsCollapsed = false
+    var ungroupedCollapsed = false
+}
+
 struct ProjectSidebar: View {
     @EnvironmentObject var studio: Studio
     @EnvironmentObject var updater: AppUpdater
     @ObservedObject var state: ViewState
-    var filtered: [Project] {
-        let query = state.search.trimmingCharacters(in: .whitespacesAndNewlines)
-        return query.isEmpty ? studio.projects : studio.projects.filter { $0.title.localizedCaseInsensitiveContains(query) }
+    @AppStorage("projectSidebarOrganization") private var savedOrganization = Data()
+    @State private var managing = false
+    @State private var checked: Set<UUID> = []
+    @State private var editingName = false
+    @State private var name = ""
+    @State private var nameTarget: NameTarget = .folder(nil)
+    @State private var confirmingDeletion = false
+
+    private enum NameTarget {
+        case folder(UUID?)
+        case project(UUID)
     }
+
+    private var organization: SidebarOrganization {
+        (try? JSONDecoder().decode(SidebarOrganization.self, from: savedOrganization)) ?? SidebarOrganization()
+    }
+    private var query: String { state.search.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var filtered: [Project] {
+        query.isEmpty ? studio.projects : studio.projects.filter { $0.title.localizedCaseInsensitiveContains(query) }
+    }
+    private var visibleIDs: Set<UUID> { Set(filtered.map(\.id)) }
+    private var selectedIDs: Set<UUID> { checked.intersection(studio.projects.map(\.id)) }
+    private func updateOrganization(_ change: (inout SidebarOrganization) -> Void) {
+        var value = organization
+        change(&value)
+        if let data = try? JSONEncoder().encode(value) { savedOrganization = data }
+    }
+
     var queueDetail: String? {
         studio.queueRunning ? "进行中" : studio.queue.isEmpty ? nil : "\(studio.queue.count) 项"
     }
@@ -119,11 +156,45 @@ struct ProjectSidebar: View {
             .padding(.horizontal, 10).frame(height: 30)
             .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Palette.hairline))
-            List(selection: $studio.selected) {
-                Section("项目") {
-                    ForEach(filtered) { p in
-                        ProjectRow(project: p).tag(p.id)
-                            .contextMenu { Button("删除项目…", role: .destructive) { state.deleteID = p.id } }
+            projectControls
+            List(selection: managing ? .constant(nil) : $studio.selected) {
+                if !organization.projectsCollapsed || !query.isEmpty || managing {
+                    ForEach(organization.folders) { folder in
+                        let projects = filtered.filter { organization.membership[$0.id] == folder.id }
+                        if query.isEmpty || !projects.isEmpty {
+                            Section {
+                                if !folder.collapsed || !query.isEmpty || managing { projectRows(projects) }
+                            } header: {
+                                groupHeader(folder.name, count: projects.count, collapsed: folder.collapsed) {
+                                    updateOrganization { value in
+                                        if let i = value.folders.firstIndex(where: { $0.id == folder.id }) {
+                                            value.folders[i].collapsed.toggle()
+                                        }
+                                    }
+                                }
+                                .contextMenu {
+                                    Button("重命名分组…") { editName(.folder(folder.id), current: folder.name) }
+                                    Button("解散分组") {
+                                        updateOrganization {
+                                            $0.folders.removeAll { $0.id == folder.id }
+                                            $0.membership = $0.membership.filter { $0.value != folder.id }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let ungrouped = filtered.filter { project in
+                        !organization.folders.contains { $0.id == organization.membership[project.id] }
+                    }
+                    if query.isEmpty || !ungrouped.isEmpty {
+                        Section {
+                            if !organization.ungroupedCollapsed || !query.isEmpty || managing { projectRows(ungrouped) }
+                        } header: {
+                            groupHeader("未分组", count: ungrouped.count, collapsed: organization.ungroupedCollapsed) {
+                                updateOrganization { $0.ungroupedCollapsed.toggle() }
+                            }
+                        }
                     }
                 }
             }
@@ -140,6 +211,137 @@ struct ProjectSidebar: View {
             .overlay(alignment: .top) { Rectangle().fill(Palette.hairline).frame(height: 1) }
         }
         .padding(.top, 12).padding(.horizontal, 10).padding(.bottom, 10)
+        .onChange(of: state.search) { _ in if managing { checked = [] } }
+        .onChange(of: studio.projects.map(\.id)) { ids in
+            let existing = Set(ids)
+            checked.formIntersection(existing)
+            if organization.membership.keys.contains(where: { !existing.contains($0) }) {
+                updateOrganization { $0.membership = $0.membership.filter { existing.contains($0.key) } }
+            }
+        }
+        .alert("名称", isPresented: $editingName) {
+            TextField("名称", text: $name)
+            Button("取消", role: .cancel) {}
+            Button("保存", action: saveName)
+        }
+        .alert("删除 \(selectedIDs.count) 个项目？", isPresented: $confirmingDeletion) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) {
+                if studio.deleteProjects(selectedIDs) { checked = []; managing = false }
+            }
+        } message: {
+            Text("所选项目会从列表移除，音频文件暂时保留。")
+        }
+    }
+
+    private var projectControls: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Button {
+                    updateOrganization { $0.projectsCollapsed.toggle() }
+                } label: {
+                    Label("项目", systemImage: organization.projectsCollapsed && query.isEmpty && !managing ? "chevron.right" : "chevron.down")
+                }
+                .disabled(!query.isEmpty || managing)
+                Spacer()
+                Button { editName(.folder(nil)) } label: { Image(systemName: "folder.badge.plus") }
+                    .help("新建分组").accessibilityLabel("新建分组")
+                Button(managing ? "完成" : "多选") { managing.toggle(); checked = [] }
+            }
+            if managing {
+                HStack {
+                    Button(!visibleIDs.isEmpty && checked == visibleIDs ? "取消全选" : "全选") {
+                        checked = checked == visibleIDs ? [] : visibleIDs
+                    }.disabled(visibleIDs.isEmpty)
+                    Text("已选 \(selectedIDs.count)").foregroundStyle(.secondary)
+                    Spacer()
+                    Menu("移组") { moveOptions(selectedIDs) }.disabled(selectedIDs.isEmpty)
+                    Button(role: .destructive) { confirmingDeletion = true } label: { Image(systemName: "trash") }
+                        .help("删除所选项目").accessibilityLabel("删除所选项目").disabled(selectedIDs.isEmpty)
+                }
+            }
+        }
+        .font(.caption)
+        .buttonStyle(.borderless)
+        .disabled(studio.isWorking)
+        .padding(.horizontal, 6)
+    }
+
+    private func groupHeader(_ title: String, count: Int, collapsed: Bool, toggle: @escaping () -> Void) -> some View {
+        Button(action: toggle) {
+            HStack {
+                Image(systemName: collapsed && query.isEmpty && !managing ? "chevron.right" : "chevron.down")
+                Text(title).lineLimit(1)
+                Spacer()
+                Text(count, format: .number)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!query.isEmpty || managing)
+    }
+
+    private func projectRows(_ projects: [Project]) -> some View {
+        ForEach(projects) { project in
+            Group {
+                if managing {
+                    Toggle(isOn: Binding(get: { checked.contains(project.id) }, set: { value in
+                        if value { checked.insert(project.id) } else { checked.remove(project.id) }
+                    })) { ProjectRow(project: project) }
+                } else {
+                    ProjectRow(project: project)
+                        .contextMenu {
+                            Button("重命名项目…") { editName(.project(project.id), current: project.title) }
+                            Menu("移到分组") { moveOptions([project.id]) }
+                            Divider()
+                            Button("删除项目…", role: .destructive) { state.deleteID = project.id }
+                        }
+                }
+            }.tag(project.id)
+        }
+    }
+
+    @ViewBuilder private func moveOptions(_ ids: Set<UUID>) -> some View {
+        ForEach(organization.folders) { folder in
+            Button(folder.name) {
+                updateOrganization { value in
+                    for id in ids { value.membership[id] = folder.id }
+                    if let index = value.folders.firstIndex(where: { $0.id == folder.id }) {
+                        value.folders[index].collapsed = false
+                    }
+                }
+            }
+        }
+        Button("未分组") { updateOrganization { value in
+            for id in ids { value.membership[id] = nil }
+            value.ungroupedCollapsed = false
+        } }
+    }
+
+    private func editName(_ target: NameTarget, current: String = "") {
+        nameTarget = target; name = current; editingName = true
+    }
+
+    private func saveName() {
+        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !studio.isWorking else { return }
+        switch nameTarget {
+        case .project(let id):
+            studio.renameProject(id, to: title)
+        case .folder(let id):
+            guard !organization.folders.contains(where: { $0.id != id && $0.name.localizedCaseInsensitiveCompare(title) == .orderedSame }) else {
+                studio.error = "已有同名分组。"
+                return
+            }
+            updateOrganization { value in
+                if let index = value.folders.firstIndex(where: { $0.id == id }) {
+                    value.folders[index].name = title
+                } else {
+                    value.folders.append(SidebarOrganization.Folder(name: title))
+                    value.projectsCollapsed = false
+                }
+            }
+        }
     }
 }
 
