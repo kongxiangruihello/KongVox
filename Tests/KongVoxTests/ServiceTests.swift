@@ -13,7 +13,7 @@ final class ServiceTests: XCTestCase {
         try json(["candidates": [["finishReason": reason, "content": ["parts": [["inlineData": ["mimeType": mime, "data": audio.base64EncodedString()]]]]]]])
     }
     func testEnginesKeepLimitsAndPreflightWithoutNetwork() throws {
-        for kind in ServiceKind.allCases where kind != .localQwen {
+        for kind in ServiceKind.allCases where kind != .localQwen && kind != .gptSoVITS {
             XCTAssertEqual(kind.engine.chunkLimit, kind == .qwenTTS ? 500 : 700)
             XCTAssertTrue(kind.engine.requiresKey)
             XCTAssertTrue(kind.engine is any HTTPSpeechEngine)
@@ -27,6 +27,50 @@ final class ServiceTests: XCTestCase {
         var mismatched = settings(.volcengine); mismatched.service?.model = "seed-tts-1.0"
         XCTAssertThrowsError(try client.preflight(text: "测试", settings: mismatched, key: "fixture-key"))
     }
+    func testGPTSoVITSRequestAndLoopbackIsolation() throws {
+        var profile = ServiceProfile.gptSoVITS
+        XCTAssertThrowsError(try profile.validated())
+        profile.referenceAudioPath = "/tmp/参考音频.wav"
+        profile.referenceTranscript = "参考音频的台词"
+        var voice = settings(profile)
+        voice.speed = 1.2
+        let client = SpeechClient()
+        let request = try client.request(text: "你好", settings: voice, key: "")
+        XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:9880/tts")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+        let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
+        XCTAssertEqual(body["text"] as? String, "你好")
+        XCTAssertEqual(body["text_lang"] as? String, "zh")
+        XCTAssertEqual(body["ref_audio_path"] as? String, profile.referenceAudioPath)
+        XCTAssertEqual(body["prompt_text"] as? String, profile.referenceTranscript)
+        XCTAssertEqual(body["prompt_lang"] as? String, "zh")
+        XCTAssertEqual(body["media_type"] as? String, "wav")
+        XCTAssertEqual(body["streaming_mode"] as? Bool, false)
+        XCTAssertEqual(body["speed_factor"] as? Double, 1.2)
+        for address in ["http://192.168.1.2:9880", "http://127.0.0.1:9880@elsewhere.test", "http://127.0.0.1:9880/other"] {
+            var unsafe = profile; unsafe.baseURL = address
+            XCTAssertThrowsError(try unsafe.validated())
+        }
+        let segment = Segment(text: "你好")
+        let old = segment.fingerprint(voice)
+        voice.service?.referenceAudioPath = "/tmp/another.wav"
+        XCTAssertFalse(old == segment.fingerprint(voice))
+    }
+
+    func testGPTSoVITSWAVThroughSpeechClient() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockProtocol.self]
+        let client = SpeechClient(session: URLSession(configuration: config))
+        var profile = ServiceProfile.gptSoVITS
+        profile.referenceAudioPath = "/tmp/reference.wav"
+        MockProtocol.count = 0; MockProtocol.failOnRequest = nil; MockProtocol.status = 200
+        MockProtocol.payload = WAVDecoderTests.fixture(rate: 32000, channels: 1)
+        let pcm = try await client.generate(text: "你好", settings: settings(profile), key: "")
+        XCTAssertEqual(pcm, try AudioFiles.extractPCM(MockProtocol.payload))
+        XCTAssertEqual(MockProtocol.count, 1)
+    }
+
     func testLocalQwenNeedsNoKeyAndBuildsItsPrompt() throws {
         let engine = ServiceKind.localQwen.engine
         XCTAssertFalse(engine.requiresKey)

@@ -8,6 +8,7 @@ enum ServiceKind: String, Codable, CaseIterable, Identifiable {
     case cosyVoice = "阿里云 CosyVoice"
     case qwenTTS = "阿里云 Qwen-TTS"
     case localQwen = "本机 Qwen3-TTS"
+    case gptSoVITS = "本机 GPT-SoVITS"
     var usesAudioDownload: Bool { self == .cosyVoice || self == .qwenTTS }
     var id: String { rawValue }
 }
@@ -26,6 +27,8 @@ struct ServiceProfile: Codable, Equatable, Identifiable {
     var voices: [String]
     var enabled = true
     // Optional for backward compatibility; secrets stay in Keychain.
+    var referenceAudioPath: String?
+    var referenceTranscript: String?
     var volcAppID: String?
     var usesVolcLegacyAuth: Bool { kind == .volcengine && !(volcAppID ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     static let openAI = ServiceProfile(id: "openai", name: "OpenAI", kind: .openAI, baseURL: "https://api.openai.com/v1", model: "gpt-4o-mini-tts", voices: ["marin", "cedar", "coral", "sage", "alloy"])
@@ -34,12 +37,14 @@ struct ServiceProfile: Codable, Equatable, Identifiable {
     static let qwenTTS = ServiceProfile(id: "aliyun-qwen-tts", name: "阿里云 Qwen-TTS", kind: .qwenTTS, baseURL: "https://dashscope.aliyuncs.com/api/v1", model: "qwen3-tts-flash", voices: ["Cherry"])
     /// Runs on this Mac. The address is where the model is downloaded from once; no key is used.
     static let localQwen = ServiceProfile(id: "local-qwen3", name: "本机 Qwen3-TTS", kind: .localQwen, baseURL: "https://huggingface.co/mlx-community", model: "Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16", voices: ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric"])
+    static let gptSoVITS = ServiceProfile(id: "local-gpt-sovits", name: "本机 GPT-SoVITS", kind: .gptSoVITS, baseURL: "http://127.0.0.1:9880", model: "api-v2", voices: ["参考音色"])
     static let volcVVVoice = "zh_female_vv_uranus_bigtts"
     static let volcengine = ServiceProfile(id: "volcengine", name: "火山引擎 豆包语音", kind: .volcengine, baseURL: "https://openspeech.bytedance.com/api/v3", model: "seed-tts-2.0", voices: [volcVVVoice])
     var modelPresets: [String] {
         switch kind {
         case .volcengine: return ["seed-tts-2.0", "seed-tts-1.0", "seed-tts-1.0-concurr"]
         case .qwenTTS: return ["qwen3-tts-flash", "qwen3-tts-instruct-flash"]
+        case .gptSoVITS: return ["api-v2"]
         case .localQwen: return ["Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16"]
         case .cosyVoice: return ["cosyvoice-v3-flash", "cosyvoice-v3-plus"]
         case .openAI: return ["gpt-4o-mini-tts"]
@@ -57,6 +62,9 @@ struct ServiceProfile: Codable, Equatable, Identifiable {
     var normalizedURL: String { baseURL.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
     var signature: String {
         let base = [id, kind.rawValue, normalizedURL, model].joined(separator: "\u{0}")
+        if kind == .gptSoVITS {
+            return [base, referenceAudioPath ?? "", referenceTranscript ?? ""].joined(separator: "\u{0}")
+        }
         return usesVolcLegacyAuth ? base + "\u{0}appid:" + (volcAppID ?? "").trimmingCharacters(in: .whitespacesAndNewlines) : base
     }
     var keyAccount: String {
@@ -80,6 +88,20 @@ struct ServiceProfile: Codable, Equatable, Identifiable {
         }
         result.voices = Array(NSOrderedSet(array: voices.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })) as? [String] ?? []
         guard !result.name.isEmpty, !result.voices.isEmpty, !result.model.isEmpty else { throw VoxError(message: "请填写服务名称、模型和至少一个声音 ID。") }
+        if result.kind == .gptSoVITS {
+            guard let endpoint = URLComponents(string: result.baseURL),
+                  endpoint.scheme == "http", endpoint.host == "127.0.0.1",
+                  endpoint.port.map({ (1...65535).contains($0) }) == true,
+                  endpoint.path.isEmpty, endpoint.user == nil, endpoint.password == nil,
+                  endpoint.query == nil, endpoint.fragment == nil else {
+                throw VoxError(message: "请输入本机地址，例如 http://127.0.0.1:9880。")
+            }
+            let path = result.referenceAudioPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard path.hasPrefix("/"), path.count > 1 else { throw VoxError(message: "请填写本机参考音频的绝对路径。") }
+            result.referenceAudioPath = path
+            result.referenceTranscript = result.referenceTranscript?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return result
+        }
         guard let components = URLComponents(string: result.baseURL), components.scheme == "https", let host = components.host, !host.isEmpty, components.user == nil, components.password == nil, components.query == nil, components.fragment == nil else { throw VoxError(message: "请填写 HTTPS 基础地址，不要包含密钥、查询参数或账号密码。") }
         guard result.model.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil else { throw VoxError(message: "模型名称只能包含字母、数字、点、下划线和连字符。") }
         if result.kind == .localQwen { _ = try result.localModelRepository() }

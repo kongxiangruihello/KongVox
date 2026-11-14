@@ -376,6 +376,7 @@ struct VoiceStep: View {
     var service: ServiceProfile { project.settings.resolvedService }
     var expressionNote: String {
         switch service.kind {
+        case .gptSoVITS: return "音色来自参考音频。支持语速设置。"
         case .localQwen: return "本机模型按提示理解表达与语速，效果为参考；留空时使用音色原本的读法。"
         case .volcengine: return "火山引擎当前不发送表达要求，只应用语速。"
         case .qwenTTS: return "Qwen Flash 使用默认语速；Instruct Flash 才支持表达与语速提示。"

@@ -7,6 +7,10 @@ func XCTAssertEqual<T: Equatable>(_ a: T, _ b: T) { precondition(a == b, "\(a) !
 func XCTAssertGreaterThan<T: Comparable>(_ a: T, _ b: T) { precondition(a > b) }
 func XCTAssertNotNil<T>(_ value: T?) { precondition(value != nil) }
 func XCTAssertNil<T>(_ value: T?) { precondition(value == nil) }
+func XCTUnwrap<T>(_ value: T?) throws -> T {
+    guard let value else { throw VoxError(message: "Expected a non-nil test value") }
+    return value
+}
 func XCTFail(_ message: String) { fatalError(message) }
 func XCTAssertThrowsError<T>(_ expression: @autoclosure () throws -> T) { do { _ = try expression(); fatalError("Expected error") } catch {} }
 #else

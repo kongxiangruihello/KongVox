@@ -22,11 +22,15 @@ extension Studio {
                 else {
                     let sample = p.segments.first ?? Segment(text: "配置检查")
                     try client.preflight(text: p.settings.reading(sample.spokenText), settings: sample.effectiveSettings(p.settings), key: key)
-                    lines.append(p.settings.resolvedService.kind == .localQwen ? "本机引擎可用，配置格式正常。" : "本地请求格式与密钥读取正常。")
+                    lines.append(p.settings.resolvedService.kind == .localQwen ? "本机引擎可用，配置格式正常。" : "合成请求配置正常。")
                 }
             } catch { lines.append("需修正：" + error.localizedDescription) }
         }
-        lines.append(p.settings.resolvedService.kind == .localQwen ? "未检查模型是否已下载；首次生成会联网下载模型（数 GB）。" : "未联网验证密钥有效性、额度和模型/音色权限；这些需通过真实试听确认。")
+        if p.settings.resolvedService.kind == .gptSoVITS {
+            lines.append("请通过服务设置的试听确认本机 GPT-SoVITS 已启动且能读取参考音频。")
+        } else {
+            lines.append(p.settings.resolvedService.kind == .localQwen ? "未检查模型是否已下载；首次生成会联网下载模型（数 GB）。" : "未联网验证密钥有效性、额度和模型/音色权限；这些需通过真实试听确认。")
+        }
         preflightMessage = lines.joined(separator: "\n")
     }
     func enableSentenceEditing() {

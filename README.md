@@ -289,3 +289,11 @@ CosyVoice 已完成一次真实长文流程验收；主观音质与其他服务�
 - [Gemini TTS](https://ai.google.dev/gemini-api/docs/generate-content/speech-generation)
 - [Gemini API Key](https://ai.google.dev/gemini-api/docs/api-key)
 - [OpenAI TTS](https://developers.openai.com/api/docs/guides/text-to-speech)
+
+### 本机 GPT-SoVITS
+
+1. 按 [GPT-SoVITS 官方说明](https://github.com/RVC-Boss/GPT-SoVITS) 安装并配置模型。在 GPT-SoVITS 目录运行 `python api_v2.py -a 127.0.0.1 -p 9880`。
+2. 在 KongVox 的「服务设置」中添加「本机 GPT-SoVITS」，填写参考音频在本机的绝对路径和对应中文文稿，再点击试听并保存。
+3. 在声音工作台选择刚保存的服务，即可生成和导出配音。每个服务配置对应一份参考音频，支持调节语速。
+
+KongVox 通过本机回环地址连接 API，无需密钥。模型权重由 GPT-SoVITS 服务管理。

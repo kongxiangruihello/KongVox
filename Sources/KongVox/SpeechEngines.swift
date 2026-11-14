@@ -77,8 +77,38 @@ extension ServiceKind {
         case .gemini: return GeminiEngine()
         case .cosyVoice: return CosyVoiceEngine()
         case .qwenTTS: return QwenEngine()
+        case .gptSoVITS: return GPTSoVITSEngine()
         case .localQwen: return LocalQwenEngine()
         }
+    }
+}
+
+struct GPTSoVITSEngine: HTTPSpeechEngine {
+    var requiresKey: Bool { false }
+    var chunkLimit: Int { 300 }
+    func path(_ profile: ServiceProfile) -> String { "/tts" }
+
+    func validate(_ job: SpeechJob) throws {
+        guard job.text.count <= chunkLimit else {
+            throw VoxError(message: "GPT-SoVITS 每段最多 \(chunkLimit) 字，请先拆分段落。")
+        }
+    }
+
+    func payload(_ job: SpeechJob, request: inout URLRequest) throws -> [String: Any] {
+        guard let reference = job.profile.referenceAudioPath else {
+            throw VoxError(message: "请填写参考音频路径。")
+        }
+        return ["text": job.text, "text_lang": "zh", "ref_audio_path": reference,
+                "prompt_text": job.profile.referenceTranscript ?? "", "prompt_lang": "zh",
+                "speed_factor": job.settings.speed, "media_type": "wav", "streaming_mode": false]
+    }
+
+    func audio(_ data: Data, http: HTTPURLResponse, job: SpeechJob, recoveryFile: URL?, client: SpeechClient) async throws -> Data {
+        guard (200..<300).contains(http.statusCode) else {
+            throw VoxError(message: "GPT-SoVITS 合成失败（HTTP \(http.statusCode)）。请检查服务日志、参考音频和对应文稿。")
+        }
+        try Task.checkCancellation()
+        return try AudioFiles.extractPCM(data)
     }
 }
 

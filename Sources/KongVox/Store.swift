@@ -63,7 +63,9 @@ import UniformTypeIdentifiers
     init(root: URL? = nil, client: SpeechClient = SpeechClient(), keyProvider: @escaping (ServiceProfile) throws -> String = { try KeyStore.read(account: $0.keyAccount) }) {
         notificationsEnabled = root == nil && UserDefaults.standard.bool(forKey: "completionNotifications")
         self.client = client
-        self.keyProvider = keyProvider
+        self.keyProvider = { service in
+            try service.kind.engine.requiresKey ? keyProvider(service) : ""
+        }
         self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("KongVox")
         projectStore = ProjectStore(root: self.root)
         do {
