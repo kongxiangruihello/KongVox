@@ -113,12 +113,14 @@ struct ProjectSidebar: View {
     @State private var checked: Set<UUID> = []
     @State private var editingName = false
     @State private var name = ""
+    @State private var projectFolder: UUID?
+    @State private var nameError: String?
     @State private var nameTarget: NameTarget = .folder(nil)
     @State private var confirmingDeletion = false
 
     private enum NameTarget {
         case folder(UUID?)
-        case project(UUID)
+        case project(UUID?)
     }
 
     private var organization: SidebarOrganization {
@@ -145,8 +147,8 @@ struct ProjectSidebar: View {
                 BrandIcon(size: 28)
                 Text("KongVox").font(.system(size: 16, weight: .bold))
                 Spacer()
-                Button(action: studio.newProject) { Image(systemName: "plus").font(.system(size: 14, weight: .semibold)).frame(width: 28, height: 28) }
-                    .buttonStyle(.borderless).help("新建配音（⌘N）").accessibilityLabel("新建配音").disabled(studio.isWorking)
+                Button(action: { editName(.project(nil)) }) { Image(systemName: "plus").font(.system(size: 14, weight: .semibold)).frame(width: 28, height: 28) }
+                    .buttonStyle(.borderless).help("新建项目（⌘N）").accessibilityLabel("新建配音").disabled(studio.isWorking)
             }
             .padding(.horizontal, 6)
             HStack(spacing: 6) {
@@ -173,7 +175,8 @@ struct ProjectSidebar: View {
                                     }
                                 }
                                 .contextMenu {
-                                    Button("重命名分组…") { editName(.folder(folder.id), current: folder.name) }
+                                    Button("在此分组新建项目…") { editName(.project(nil), folder: folder.id) }
+                                    Button("编辑分组…") { editName(.folder(folder.id), current: folder.name) }
                                     Button("解散分组") {
                                         updateOrganization {
                                             $0.folders.removeAll { $0.id == folder.id }
@@ -219,10 +222,27 @@ struct ProjectSidebar: View {
                 updateOrganization { $0.membership = $0.membership.filter { existing.contains($0.key) } }
             }
         }
-        .alert("名称", isPresented: $editingName) {
-            TextField("名称", text: $name)
-            Button("取消", role: .cancel) {}
-            Button("保存", action: saveName)
+        .focusedSceneValue(\.newSidebarProject, { editName(.project(nil)) })
+        .sheet(isPresented: $editingName) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(editorTitle).font(.headline)
+                TextField("名称", text: $name)
+                if case .project = nameTarget {
+                    Picker("分组", selection: $projectFolder) {
+                        Text("未分组").tag(nil as UUID?)
+                        ForEach(organization.folders) { Text($0.name).tag(Optional($0.id)) }
+                    }
+                }
+                if let nameError { Text(nameError).font(.caption).foregroundStyle(.red) }
+                HStack {
+                    Spacer()
+                    Button("取消") { editingName = false }.keyboardShortcut(.cancelAction)
+                    Button("保存", action: saveName).keyboardShortcut(.defaultAction)
+                        .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || studio.isWorking)
+                }
+            }
+            .padding(24)
+            .frame(width: 340)
         }
         .alert("删除 \(selectedIDs.count) 个项目？", isPresented: $confirmingDeletion) {
             Button("取消", role: .cancel) {}
@@ -291,7 +311,7 @@ struct ProjectSidebar: View {
                 } else {
                     ProjectRow(project: project)
                         .contextMenu {
-                            Button("重命名项目…") { editName(.project(project.id), current: project.title) }
+                            Button("编辑项目…") { editName(.project(project.id), current: project.title, folder: organization.membership[project.id]) }
                             Menu("移到分组") { moveOptions([project.id]) }
                             Divider()
                             Button("删除项目…", role: .destructive) { state.deleteID = project.id }
@@ -318,8 +338,15 @@ struct ProjectSidebar: View {
         } }
     }
 
-    private func editName(_ target: NameTarget, current: String = "") {
-        nameTarget = target; name = current; editingName = true
+    private var editorTitle: String {
+        switch nameTarget {
+        case .project(let id): return id == nil ? "新建项目" : "编辑项目"
+        case .folder(let id): return id == nil ? "新建分组" : "编辑分组"
+        }
+    }
+
+    private func editName(_ target: NameTarget, current: String = "", folder: UUID? = nil) {
+        nameTarget = target; name = current; projectFolder = folder; nameError = nil; editingName = true
     }
 
     private func saveName() {
@@ -327,10 +354,30 @@ struct ProjectSidebar: View {
         guard !title.isEmpty, !studio.isWorking else { return }
         switch nameTarget {
         case .project(let id):
-            studio.renameProject(id, to: title)
+            let projectID: UUID
+            if let id {
+                guard studio.renameProject(id, to: title) else { return }
+                projectID = id
+            } else {
+                guard let id = studio.newProject(title: title) else { return }
+                projectID = id
+                state.search = ""
+                state.step = .script
+                managing = false
+                checked = []
+            }
+            updateOrganization { value in
+                value.membership[projectID] = projectFolder
+                value.projectsCollapsed = false
+                if let i = value.folders.firstIndex(where: { $0.id == projectFolder }) {
+                    value.folders[i].collapsed = false
+                } else {
+                    value.ungroupedCollapsed = false
+                }
+            }
         case .folder(let id):
             guard !organization.folders.contains(where: { $0.id != id && $0.name.localizedCaseInsensitiveCompare(title) == .orderedSame }) else {
-                studio.error = "已有同名分组。"
+                nameError = "已有同名分组。"
                 return
             }
             updateOrganization { value in
@@ -342,6 +389,7 @@ struct ProjectSidebar: View {
                 }
             }
         }
+        editingName = false
     }
 }
 

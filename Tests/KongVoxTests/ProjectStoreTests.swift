@@ -14,7 +14,8 @@ final class ProjectStoreTests: XCTestCase {
     @MainActor func testSidebarRenameAndDeleteProjects() throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let studio = Studio(root: root)
-        studio.newProject()
+        let named = try XCTUnwrap(studio.newProject(title: "新建项目"))
+        XCTAssertEqual(Studio(root: root).projects.first { $0.id == named }?.title, "新建项目")
         studio.newProject()
         let retained = try XCTUnwrap(studio.projects.last)
         let deleted = Set(studio.projects.dropLast().map(\.id))

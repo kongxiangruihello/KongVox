@@ -242,21 +242,28 @@ import UniformTypeIdentifiers
         clearSpeechFindings("内容已改变，请重新核对")
         return true
     }
-    func renameProject(_ id: UUID, to title: String) {
-        guard !isWorking, storageAvailable, let index = projects.firstIndex(where: { $0.id == id }) else { return }
+    @discardableResult func renameProject(_ id: UUID, to title: String) -> Bool {
+        guard !isWorking, storageAvailable, let index = projects.firstIndex(where: { $0.id == id }) else { return false }
         var updated = projects[index]
         updated.title = title
         do {
             try projectStore.saveProject(updated)
             projects[index] = updated
+            return true
         } catch {
             self.error = "项目重命名失败：\(error.localizedDescription)"
+            return false
         }
     }
-    func newProject() {
-        guard !isWorking else { return }
+    @discardableResult func newProject(title: String? = nil) -> UUID? {
+        guard !isWorking, storageAvailable else { return nil }
+        var project = makeProject()
+        if let title { project.title = title }
         stop()
-        let p = makeProject(); projects.insert(p, at: 0); selected = p.id; save()
+        projects.insert(project, at: 0)
+        guard save() else { projects.removeAll { $0.id == project.id }; return nil }
+        selected = project.id
+        return project.id
     }
     func importDraft() {
         edit { p in

@@ -13,7 +13,18 @@ import SwiftUI
         KongVoxApp.main()
     }
 }
+private struct NewSidebarProject: FocusedValueKey {
+    typealias Value = () -> Void
+}
+extension FocusedValues {
+    var newSidebarProject: (() -> Void)? {
+        get { self[NewSidebarProject.self] }
+        set { self[NewSidebarProject.self] = newValue }
+    }
+}
+
 struct KongVoxApp: App {
+    @FocusedValue(\.newSidebarProject) private var newSidebarProject
     @StateObject private var studio = Studio()
     @StateObject private var updater = AppUpdater()
     var body: some Scene {
@@ -22,7 +33,7 @@ struct KongVoxApp: App {
         }
         .defaultSize(width: 1240, height: 820)
         .commands {
-            CommandGroup(replacing: .newItem) { Button("新建配音") { studio.newProject() }.keyboardShortcut("n").disabled(studio.isWorking) }
+            CommandGroup(replacing: .newItem) { Button("新建项目…") { newSidebarProject?() }.keyboardShortcut("n").disabled(studio.isWorking || newSidebarProject == nil) }
             CommandGroup(after: .appInfo) { Button("检查更新…") { updater.check(manual: true) } }
         }
     }
