@@ -34,6 +34,23 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(Studio(root: root).selected, reopened.selected)
     }
 
+    @MainActor func testTrashSurvivesRestartAndProtectsAudio() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let studio = Studio(root: root)
+        let id = try XCTUnwrap(studio.newProject(title: "待恢复", narration: "测试文稿。"))
+        let take = Take(file: "retained.wav", fingerprint: "fixture")
+        try AudioFiles.writePCM(Data(count: 480), to: studio.audioURL(take))
+        studio.edit { $0.segments[0].takes = [take] }
+        XCTAssertTrue(studio.trashProjects([id]))
+        let reopened = Studio(root: root)
+        XCTAssertEqual(reopened.trashedProjects.map(\.id), [id])
+        XCTAssertTrue(try reopened.audioCleanupPlan().files.isEmpty)
+        XCTAssertTrue(reopened.restoreProject(id))
+        let restored = Studio(root: root)
+        XCTAssertEqual(restored.projects.first { $0.id == id }?.longText, "测试文稿。")
+        XCTAssertTrue(restored.trashedProjects.isEmpty)
+    }
+
     func testLegacyFileMigratesOnceAndIsKeptAsBackup() throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let legacy = [project("甲"), project("乙"), project("丙")]

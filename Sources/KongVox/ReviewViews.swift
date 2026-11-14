@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 final class ReviewState: ObservableObject {
     @Published var repairID: UUID?
@@ -63,6 +64,7 @@ struct FinishedReview: View {
                     if state.follow, let id { withAnimation { proxy.scrollTo(id, anchor: .center) } }
                 }
                 .onAppear { if let initialSegment { proxy.scrollTo(initialSegment, anchor: .center) } }
+                .background(PlaybackScrollObserver { state.follow = false })
             }
             Text(studio.status).font(.caption).foregroundStyle(.secondary)
             if studio.project?.isLongMode == true && studio.project?.needsLongPreparation == true {
@@ -88,7 +90,13 @@ struct SegmentRepair: View {
     @EnvironmentObject var studio: Studio
     @Environment(\.dismiss) private var dismiss
     @StateObject private var state = RepairState()
+    @State private var comparisonTake: UUID?
     let segmentID: UUID
+    private func compare(_ take: Take) {
+        let offset = comparisonTake == nil ? 0 : studio.playbackTime
+        studio.play(studio.audioURL(take), from: offset)
+        comparisonTake = take.id
+    }
     var segment: Segment? { studio.project?.segments.first { $0.id == segmentID } }
     var dirty: Bool {
         state.pronunciation != segment?.pronunciation ||
@@ -130,6 +138,15 @@ struct SegmentRepair: View {
                     if studio.isWorking && studio.activeSegment == segmentID { Button("取消") { studio.cancel() } }
                 }
                 Text("新版本先保留供对比，点击「采用」才进入成品。旧版本即使不匹配当前设置，仍可试听；关闭前请保存读法。").font(.caption).foregroundStyle(.secondary)
+                if let a = segment.current, let b = segment.takes.first(where: { $0.id != a.id }) {
+                    HStack {
+                        Button("A · 当前采用") { compare(a) }
+                        Button("B · 候选版本") { compare(b) }
+                        Button("采用 B") { studio.adoptTake(segmentID: segmentID, takeID: b.id) }
+                            .disabled(dirty || !segment.matches(b, p.settings))
+                        if studio.player != nil { PlaybackScrubber(clock: studio.clock, label: "A/B 试听进度") }
+                    }.disabled(studio.isWorking)
+                }
                 List {
                     ForEach(Array(segment.takes.enumerated()), id: \.element.id) { index, take in
                         VStack(alignment: .leading, spacing: 5) {
@@ -161,4 +178,29 @@ struct SegmentRepair: View {
         }
         .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil } } message: { Text(studio.error ?? "") }
     }
+}
+
+private struct PlaybackScrollObserver: NSViewRepresentable {
+    var onScroll: () -> Void
+
+    final class Observer: NSView {
+        var onScroll: (() -> Void)?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                if let self, event.window == self.window,
+                   self.bounds.contains(self.convert(event.locationInWindow, from: nil)) {
+                    self.onScroll?()
+                }
+                return event
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> Observer { Observer() }
+    func updateNSView(_ view: Observer, context: Context) { view.onScroll = onScroll }
 }

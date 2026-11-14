@@ -19,6 +19,7 @@ struct DeliveryView: View {
     @EnvironmentObject var studio: Studio
     @Environment(\.dismiss) private var dismiss
     @StateObject private var state = DeliveryState()
+    @AppStorage("KongVox.lastDeliveryFormat") private var lastFormat = "zip"
     var initialFormat = "zip"
     var current: Bool { studio.project?.deliveryRevision == state.revision }
     var body: some View {
@@ -68,6 +69,10 @@ struct DeliveryView: View {
                         }.padding(.vertical, 5)
                     }
                 }
+                LabeledContent("导出预览") {
+                    Text("\(studio.deliveryName(p, format: state.format)) · \(report.duration.map { Studio.timeLabel($0) } ?? "时长待就绪") · \(p.chapters.count) 章 · \(subtitleSummary)")
+                        .font(.caption).textSelection(.enabled)
+                }
                 HStack {
                     Picker("交付格式", selection: $state.format) {
                         Text("音频 + 字幕 ZIP").tag("zip"); Text("SRT 字幕").tag("srt")
@@ -78,6 +83,7 @@ struct DeliveryView: View {
                     Toggle("已核对以上提示", isOn: $state.checked)
                     Spacer()
                     Button("确认并导出…") {
+                        lastFormat = state.format
                         if state.format == "zip" { studio.exportBundle() }
                         else if state.format == "srt" { studio.exportSubtitles() }
                         else if state.format == "short-video" { studio.exportShortVideoPackage() }
@@ -88,7 +94,7 @@ struct DeliveryView: View {
             } else { Spacer() }
             Text(studio.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
         }.padding(24).frame(width: 940, height: 700)
-        .task { state.format = initialFormat; await refresh() }
+        .task { state.format = initialFormat == "zip" ? lastFormat : initialFormat; if state.format == "mp3" && Studio.ffmpeg == nil { state.format = "zip" }; await refresh() }
         .sheet(isPresented: $state.showRepair) { if let id = state.repairID { SegmentRepair(segmentID: id).environmentObject(studio) } }
         .sheet(isPresented: $state.showCaptions) { CaptionEditor().environmentObject(studio) }
         .sheet(isPresented: $state.showGenerate) { GenerationReview().environmentObject(studio) }
@@ -96,6 +102,13 @@ struct DeliveryView: View {
             Button("清除并改用自动字幕", role: .destructive) { studio.clearCaptionEdits(); Task { await refresh() } }
         } message: { Text("音频和文稿不受影响。清除后无法撤销，除非恢复之前保存的项目版本。") }
         .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil } } message: { Text(studio.error ?? "") }
+    }
+    private var subtitleSummary: String {
+        switch state.format {
+        case "short-video": return "SRT、ASS 字幕"
+        case "zip", "srt": return "SRT 字幕"
+        default: return "仅音频"
+        }
     }
     @MainActor func refresh() async {
         guard !studio.isWorking, let p = studio.project else { return }

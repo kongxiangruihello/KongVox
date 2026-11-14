@@ -55,7 +55,7 @@ extension Studio {
         return lists
     }
     func audioCleanupPlan() throws -> AudioCleanupPlan {
-        let referenced = try AudioMaintenance.referencedFiles(projects: projects, versions: allVersionLists())
+        let referenced = try AudioMaintenance.referencedFiles(projects: projects + (try readTrash()), versions: allVersionLists())
         return try AudioMaintenance.plan(audioFolder: root.appendingPathComponent("Audio"), referenced: referenced)
     }
     /// Deletes files from a previewed plan that are still unreferenced now.
@@ -75,6 +75,54 @@ extension Studio {
             status = "已清理 \(removed) 个未引用的音频文件，释放约 \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))。"
         } catch { self.error = "清理未完成：\(error.localizedDescription)" }
     }
+    private var trashFile: URL { root.appendingPathComponent("trash.json") }
+
+    private func readTrash() throws -> [Project] {
+        guard FileManager.default.fileExists(atPath: trashFile.path) else { return [] }
+        return try JSONDecoder().decode([Project].self, from: Data(contentsOf: trashFile))
+    }
+
+    func loadTrash() { trashedProjects = (try? readTrash())?.filter { item in !projects.contains { $0.id == item.id } } ?? [] }
+
+    @discardableResult func trashProjects(_ ids: Set<UUID>) -> Bool {
+        guard !isWorking, storageAvailable else { return false }
+        let removed = projects.filter { ids.contains($0.id) }
+        guard !removed.isEmpty else { return false }
+        do {
+            let updated = try readTrash().filter { !ids.contains($0.id) } + removed
+            try JSONEncoder().encode(updated).write(to: trashFile, options: .atomic)
+            stop()
+            let previous = projects
+            projects.removeAll { ids.contains($0.id) }
+            if projects.isEmpty { projects = [makeProject()] }
+            guard save() else { projects = previous; return false }
+            if let selected, ids.contains(selected) { self.selected = projects.first?.id }
+            queue.removeAll { ids.contains($0.projectID) }
+            saveQueue()
+            loadTrash()
+            status = "已移到回收站，可以恢复。"
+            return true
+        } catch { self.error = "无法移到回收站：\(error.localizedDescription)"; return false }
+    }
+
+    @discardableResult func restoreProject(_ id: UUID) -> Bool {
+        restoreProjects([id])
+    }
+
+    @discardableResult func restoreProjects(_ ids: Set<UUID>) -> Bool {
+        guard !isWorking, storageAvailable else { return false }
+        let items = trashedProjects.filter { ids.contains($0.id) }
+        guard let first = items.first else { return false }
+        let previous = projects
+        projects.insert(contentsOf: items, at: 0)
+        guard save() else { projects = previous; return false }
+        selected = first.id
+        do { try JSONEncoder().encode(try readTrash().filter { !ids.contains($0.id) }).write(to: trashFile, options: .atomic) }
+        catch { self.error = "已恢复配音，回收站清单暂未更新。" }
+        loadTrash()
+        return true
+    }
+
     /// Removes a project, its queue entry, version snapshots and download receipts. Audio files stay until cleanup.
     func deleteProject(_ id: UUID) {
         deleteProjects([id])

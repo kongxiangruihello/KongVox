@@ -96,8 +96,14 @@ private struct SidebarOrganization: Codable {
         var id = UUID()
         var name: String
         var collapsed = false
+        var pinned: Bool?
     }
 
+    var projects: [Folder]?
+    var archivedProjects: [Folder]?
+    var archivedRecordings: [UUID: Set<UUID>]?
+    var legacyProjectID: UUID?
+    var parents: [UUID: UUID]?
     var folders: [Folder] = []
     var membership: [UUID: UUID] = [:]
 }
@@ -116,19 +122,43 @@ struct ProjectSidebar: View {
     @State private var narrationText = ""
     @State private var nameTarget: NameTarget = .folder(nil)
     @State private var confirmingDeletion = false
+    @State private var projectToDelete: UUID?
 
     private enum NameTarget {
         case narration
+        case audio(UUID)
         case folder(UUID?)
         case project(UUID?)
     }
 
     private var organization: SidebarOrganization {
-        (try? JSONDecoder().decode(SidebarOrganization.self, from: savedOrganization)) ?? SidebarOrganization()
+        var value = (try? JSONDecoder().decode(SidebarOrganization.self, from: savedOrganization)) ?? SidebarOrganization()
+        if value.projects == nil {
+            // Preserve legacy group IDs and every audio document's membership.
+            let archive = SidebarOrganization.Folder(name: "已有配音")
+            value.projects = [archive]
+            value.legacyProjectID = archive.id
+            value.parents = Dictionary(uniqueKeysWithValues: value.folders.map { ($0.id, archive.id) })
+        }
+        if value.legacyProjectID == nil { value.legacyProjectID = value.projects?.first?.id }
+        return value
     }
+    @State private var parentProject: UUID?
+    @State private var currentContainer: UUID?
+    @State private var currentGroup: UUID?
+    @State private var showTrash = false
+    @State private var dropTarget: UUID?
+    private var projectNodes: [SidebarOrganization.Folder] { (organization.projects ?? []).filter { $0.pinned == true } + (organization.projects ?? []).filter { $0.pinned != true } }
+    private var activeContainer: UUID? {
+        if let currentContainer, projectNodes.contains(where: { $0.id == currentContainer }) { return currentContainer }
+        if let selected = studio.selected, let group = organization.membership[selected],
+           let parent = organization.parents?[group] { return parent }
+        return projectNodes.first?.id
+    }
+
     private var query: String { state.search.trimmingCharacters(in: .whitespacesAndNewlines) }
     var filtered: [Project] {
-        query.isEmpty ? studio.projects : studio.projects.filter { $0.title.localizedCaseInsensitiveContains(query) }
+        query.isEmpty ? studio.projects : studio.projects.filter { ($0.title + " " + path(for: $0.id)).localizedCaseInsensitiveContains(query) }
     }
     private var visibleIDs: Set<UUID> { Set(filtered.map(\.id)) }
     private var selectedIDs: Set<UUID> { checked.intersection(studio.projects.map(\.id)) }
@@ -159,27 +189,67 @@ struct ProjectSidebar: View {
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Palette.hairline))
             projectControls
             List(selection: managing ? .constant(nil) : $studio.selected) {
-                projectRows(filtered.filter { project in
-                    !organization.folders.contains { $0.id == organization.membership[project.id] }
-                })
-                ForEach(organization.folders) { folder in
-                    let projects = filtered.filter { organization.membership[$0.id] == folder.id }
-                    if query.isEmpty || !projects.isEmpty {
-                        Section {
-                            if !folder.collapsed || !query.isEmpty || managing { projectRows(projects, grouped: true) }
-                        } header: {
-                            groupHeader(folder.name, count: projects.count, collapsed: folder.collapsed) {
-                                updateOrganization { value in
-                                    if let i = value.folders.firstIndex(where: { $0.id == folder.id }) {
-                                        value.folders[i].collapsed.toggle()
+                ForEach(projectNodes) { node in
+                    Section {
+                        if !node.collapsed || !query.isEmpty || managing {
+                            ForEach(organization.folders.filter { organization.parents?[$0.id] == node.id }) { folder in
+                                let items = filtered.filter { organization.membership[$0.id] == folder.id }
+                                if query.isEmpty || !items.isEmpty {
+                                    groupHeader(folder.name, count: items.count, collapsed: folder.collapsed) {
+                                        currentContainer = node.id; currentGroup = folder.id
+                                        guard query.isEmpty, !managing else { return }
+                                        updateOrganization { value in
+                                            if let i = value.folders.firstIndex(where: { $0.id == folder.id }) { value.folders[i].collapsed.toggle() }
+                                        }
                                     }
+                                    .padding(.leading, 12)
+                                    .background(dropTarget == folder.id ? Palette.accent.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 5))
+                                    .help(groupLabel(folder))
+                                    .dropDestination(for: String.self) { values, _ in
+                                        let ids = Set(values.compactMap(UUID.init(uuidString:))).intersection(studio.projects.map(\.id))
+                                        guard !studio.isWorking, !ids.isEmpty else { return false }
+                                        move(ids, to: folder.id)
+                                        return true
+                                    } isTargeted: { targeted in
+                                        if targeted { dropTarget = folder.id }
+                                        else if dropTarget == folder.id { dropTarget = nil }
+                                    }
+                                    .contextMenu {
+                                        Button("在此分组新建配音…") { editName(.narration, folder: folder.id) }
+                                        Button("编辑分组…") { editName(.folder(folder.id), current: folder.name) }
+                                        Button("解散分组") { dissolve(folder.id) }
+                                    }
+                                    if !folder.collapsed || !query.isEmpty || managing { projectRows(items, grouped: true) }
                                 }
                             }
-                            .contextMenu {
-                                Button("在此分组新建项目…") { editName(.project(nil), folder: folder.id) }
-                                Button("编辑分组…") { editName(.folder(folder.id), current: folder.name) }
-                                Button("解散分组") { dissolve(folder.id) }
+                            if node.id == organization.legacyProjectID {
+                                let loose = filtered.filter { organization.membership[$0.id] == nil }
+                                if !loose.isEmpty {
+                                    Label("未分组", systemImage: "folder").padding(.leading, 12)
+                                    projectRows(loose, grouped: true)
+                                }
                             }
+                        }
+                    } header: {
+                        groupHeader(node.pinned == true ? "📌 " + node.name : node.name, count: filtered.filter { item in
+                            (organization.membership[item.id].flatMap { organization.parents?[$0] } ?? organization.legacyProjectID) == node.id
+                        }.count, collapsed: node.collapsed) {
+                            currentContainer = node.id; currentGroup = nil
+                            guard query.isEmpty, !managing else { return }
+                            updateOrganization { value in
+                                if let i = value.projects?.firstIndex(where: { $0.id == node.id }) { value.projects?[i].collapsed.toggle() }
+                            }
+                        }
+                        .contextMenu {
+                            Button("在此项目新建分组…") { editName(.folder(nil), parent: node.id) }
+                            Button(node.pinned == true ? "取消置顶" : "置顶项目") {
+                                updateOrganization { value in
+                                    if let i = value.projects?.firstIndex(where: { $0.id == node.id }) { value.projects?[i].pinned = node.pinned != true }
+                                }
+                            }
+                            Button("编辑项目…") { editName(.project(node.id), current: node.name) }
+                            Button("删除项目…", role: .destructive) { projectToDelete = node.id }
+                                .disabled(projectNodes.count == 1)
                         }
                     }
                 }
@@ -197,13 +267,58 @@ struct ProjectSidebar: View {
             .overlay(alignment: .top) { Rectangle().fill(Palette.hairline).frame(height: 1) }
         }
         .padding(.top, 12).padding(.horizontal, 10).padding(.bottom, 10)
-        .onChange(of: state.search) { _ in if managing { checked = [] } }
-        .onChange(of: studio.projects.map(\.id)) { ids in
-            let existing = Set(ids)
-            checked.formIntersection(existing)
-            if organization.membership.keys.contains(where: { !existing.contains($0) }) {
-                updateOrganization { $0.membership = $0.membership.filter { existing.contains($0.key) } }
+        .onAppear {
+            if (try? JSONDecoder().decode(SidebarOrganization.self, from: savedOrganization))?.projects == nil {
+                updateOrganization { _ in }
             }
+        }
+        .onChange(of: state.search) { _ in if managing { checked = [] } }
+        .onChange(of: studio.selected) { id in
+            currentGroup = id.flatMap { organization.membership[$0] }
+            currentContainer = currentGroup.flatMap { organization.parents?[$0] } ?? organization.legacyProjectID
+        }
+        .onChange(of: studio.projects.map(\.id)) { ids in checked.formIntersection(ids) }
+        .sheet(isPresented: $showTrash) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack { Text("回收站").font(.headline); Spacer(); Button("完成") { showTrash = false } }
+                if studio.trashedProjects.isEmpty && (organization.archivedProjects ?? []).isEmpty {
+                    Text("回收站为空。").foregroundStyle(.secondary)
+                }
+                ForEach(organization.archivedProjects ?? []) { node in
+                    HStack {
+                        Label(node.name, systemImage: "folder")
+                        Spacer()
+                        Button("恢复项目") {
+                            let ids = (organization.archivedRecordings?[node.id] ?? []).intersection(studio.trashedProjects.map(\.id))
+                            guard ids.isEmpty || studio.restoreProjects(ids) else { return }
+                            updateOrganization { value in
+                                value.projects?.append(node)
+                                value.archivedProjects?.removeAll { $0.id == node.id }
+                                value.archivedRecordings?[node.id] = nil
+                            }
+                            showTrash = false
+                        }
+                    }
+                }
+                List(studio.trashedProjects.filter { item in
+                    let parent = organization.membership[item.id].flatMap { organization.parents?[$0] } ?? organization.legacyProjectID
+                    return !(organization.archivedProjects ?? []).contains { $0.id == parent }
+                }) { item in
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(item.title)
+                            Text(path(for: item.id)).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("恢复") {
+                            if studio.restoreProject(item.id) {
+                                move([item.id], to: organization.membership[item.id])
+                                showTrash = false
+                            }
+                        }
+                    }
+                }
+            }.padding(20).frame(width: 440, height: 300)
         }
         .focusedSceneValue(\.newSidebarProject, { editName(.project(nil)) })
         .sheet(isPresented: $editingName) {
@@ -214,10 +329,22 @@ struct ProjectSidebar: View {
                     Text("配音文稿").font(.caption)
                     TextEditor(text: $narrationText).frame(minHeight: 130).accessibilityLabel("配音文稿")
                 }
+                if editorChoosesProject {
+                    Picker("所属项目", selection: $parentProject) {
+                        ForEach(projectNodes) { Text($0.name).tag(Optional($0.id)) }
+                    }.onChange(of: parentProject) { project in
+                        if let group = projectFolder, organization.parents?[group] != project { projectFolder = nil }
+                    }
+                }
                 if editorShowsFolder {
                     Picker("分组", selection: $projectFolder) {
-                        Text("未分组").tag(nil as UUID?)
-                        ForEach(organization.folders) { Text($0.name).tag(Optional($0.id)) }
+                        Text(editorChoosesProject ? "默认分组" : "未分组").tag(nil as UUID?)
+                        ForEach(organization.folders.filter { folder in
+                            let owner = organization.parents?[folder.id]
+                            return projectNodes.contains { $0.id == owner } && (!editorChoosesProject || owner == parentProject)
+                        }) {
+                            Text(groupLabel($0)).tag(Optional($0.id))
+                        }
                     }
                 }
                 if let nameError { Text(nameError).font(.caption).foregroundStyle(.red) }
@@ -231,13 +358,33 @@ struct ProjectSidebar: View {
             .padding(24)
             .frame(width: 340)
         }
-        .alert("删除 \(selectedIDs.count) 个项目？", isPresented: $confirmingDeletion) {
-            Button("取消", role: .cancel) {}
-            Button("删除", role: .destructive) {
-                if studio.deleteProjects(selectedIDs) { checked = []; managing = false }
+        .confirmationDialog("将项目移到回收站？", isPresented: Binding(get: { projectToDelete != nil }, set: { if !$0 { projectToDelete = nil } })) {
+            Button("移到回收站", role: .destructive) {
+                guard let id = projectToDelete, projectNodes.count > 1,
+                      let node = projectNodes.first(where: { $0.id == id }) else { return }
+                let ids = recordings(in: id).intersection(studio.projects.map(\.id))
+                guard ids.isEmpty || studio.trashProjects(ids) else { return }
+                updateOrganization { value in
+                    value.archivedProjects = (value.archivedProjects ?? []) + [node]
+                    var recorded = value.archivedRecordings ?? [:]
+                    recorded[id] = ids
+                    value.archivedRecordings = recorded
+                    value.projects?.removeAll { $0.id == id }
+                }
+                projectToDelete = nil
             }
         } message: {
-            Text("所选项目会从列表移除，音频文件暂时保留。")
+            if let id = projectToDelete {
+                Text("包含 \(organization.folders.filter { organization.parents?[$0.id] == id }.count) 个分组、\(recordings(in: id).intersection(studio.projects.map(\.id)).count) 条配音。可从回收站恢复。")
+            }
+        }
+        .alert("删除 \(selectedIDs.count) 条配音？", isPresented: $confirmingDeletion) {
+            Button("取消", role: .cancel) {}
+            Button("移到回收站", role: .destructive) {
+                if studio.trashProjects(selectedIDs) { checked = []; managing = false }
+            }
+        } message: {
+            Text("所选配音会从列表移除，音频文件暂时保留。")
         }
     }
 
@@ -246,24 +393,25 @@ struct ProjectSidebar: View {
             Button("新建项目…", systemImage: "doc.badge.plus") { editName(.project(nil)) }
             Button("新建分组…", systemImage: "folder.badge.plus") { editName(.folder(nil)) }
             Button("新建配音…", systemImage: "waveform") {
-                editName(.narration, folder: studio.selected.flatMap { organization.membership[$0] })
+                editName(.narration, folder: currentGroup, parent: activeContainer)
             }
             Divider()
             if let project = studio.project {
-                Button("编辑当前项目…", systemImage: "pencil") {
-                    editName(.project(project.id), current: project.title, folder: organization.membership[project.id])
+                Button("编辑当前配音…", systemImage: "pencil") {
+                    editName(.audio(project.id), current: project.title, folder: organization.membership[project.id])
                 }
-                Button("删除当前项目…", systemImage: "trash", role: .destructive) { state.deleteID = project.id }
+                Button("删除当前配音…", systemImage: "trash", role: .destructive) { state.deleteID = project.id }
             }
             Menu("管理分组") {
-                ForEach(organization.folders) { folder in
-                    Menu(folder.name) {
+                ForEach(organization.folders.filter { folder in projectNodes.contains { $0.id == organization.parents?[folder.id] } }) { folder in
+                    Menu(groupLabel(folder)) {
                         Button("编辑分组…") { editName(.folder(folder.id), current: folder.name) }
                         Button("解散分组", role: .destructive) { dissolve(folder.id) }
                     }
                 }
-            }.disabled(organization.folders.isEmpty)
-            Button(managing ? "结束多选" : "多选项目") { managing.toggle(); checked = [] }
+            }.disabled(!organization.folders.contains { folder in projectNodes.contains { $0.id == organization.parents?[folder.id] } })
+            Button("回收站…") { showTrash = true }
+            Button(managing ? "结束多选" : "多选配音") { managing.toggle(); checked = [] }
         } label: {
             Image(systemName: "plus").font(.system(size: 14, weight: .semibold)).frame(width: 28, height: 28)
         }
@@ -278,6 +426,7 @@ struct ProjectSidebar: View {
     private func dissolve(_ id: UUID) {
         updateOrganization {
             $0.folders.removeAll { $0.id == id }
+            $0.parents?[id] = nil
             $0.membership = $0.membership.filter { $0.value != id }
         }
     }
@@ -295,7 +444,7 @@ struct ProjectSidebar: View {
                 HStack {
                     Button(!visibleIDs.isEmpty && checked == visibleIDs ? "取消全选" : "全选") {
                         checked = checked == visibleIDs ? [] : visibleIDs
-                    }.disabled(visibleIDs.isEmpty)
+                    }.keyboardShortcut("a", modifiers: .command).disabled(visibleIDs.isEmpty)
                     Text("已选 \(selectedIDs.count)").foregroundStyle(.secondary)
                     Spacer()
                     Menu("移组") { moveOptions(selectedIDs) }.disabled(selectedIDs.isEmpty)
@@ -321,7 +470,6 @@ struct ProjectSidebar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(!query.isEmpty || managing)
     }
 
     private func projectRows(_ projects: [Project], grouped: Bool = false) -> some View {
@@ -332,37 +480,73 @@ struct ProjectSidebar: View {
                         if value { checked.insert(project.id) } else { checked.remove(project.id) }
                     })) { ProjectRow(project: project) }
                 } else {
-                    ProjectRow(project: project)
+                    VStack(alignment: .leading) {
+                        ProjectRow(project: project)
+                        if !query.isEmpty { Text(path(for: project.id)).font(.caption2).foregroundStyle(.secondary) }
+                    }
+                        .draggable(project.id.uuidString)
                         .contextMenu {
-                            Button("编辑项目…") { editName(.project(project.id), current: project.title, folder: organization.membership[project.id]) }
+                            Button("编辑配音…") { editName(.audio(project.id), current: project.title, folder: organization.membership[project.id]) }
                             Menu("移到分组") { moveOptions([project.id]) }
                             Divider()
-                            Button("删除项目…", role: .destructive) { state.deleteID = project.id }
+                            Button("删除配音…", role: .destructive) { state.deleteID = project.id }
                         }
                 }
-            }.padding(.leading, grouped ? 16 : 0).tag(project.id)
+            }.padding(.leading, grouped ? 28 : 0).tag(project.id)
+        }
+    }
+
+    private func groupLabel(_ folder: SidebarOrganization.Folder) -> String {
+        let parent = (projectNodes + (organization.archivedProjects ?? [])).first { $0.id == organization.parents?[folder.id] }
+        return parent.map { $0.name + " / " + folder.name } ?? folder.name
+    }
+
+    private func recordings(in project: UUID) -> Set<UUID> {
+        Set((studio.projects + studio.trashedProjects).filter { item in
+            (organization.membership[item.id].flatMap { organization.parents?[$0] } ?? organization.legacyProjectID) == project
+        }.map(\.id))
+    }
+
+    private func path(for id: UUID) -> String {
+        guard let group = organization.folders.first(where: { $0.id == organization.membership[id] }) else {
+            return (projectNodes.first { $0.id == organization.legacyProjectID }?.name ?? "已有配音") + " / 未分组"
+        }
+        return groupLabel(group)
+    }
+
+    private func move(_ ids: Set<UUID>, to folder: UUID?) {
+        updateOrganization { value in
+            let destination = value.folders.firstIndex { $0.id == folder }
+            for id in ids { value.membership[id] = destination.map { value.folders[$0].id } }
+            if let destination {
+                value.folders[destination].collapsed = false
+                if let parent = value.parents?[value.folders[destination].id],
+                   let index = value.projects?.firstIndex(where: { $0.id == parent }) {
+                    value.projects?[index].collapsed = false
+                }
+            }
         }
     }
 
     @ViewBuilder private func moveOptions(_ ids: Set<UUID>) -> some View {
-        ForEach(organization.folders) { folder in
-            Button(folder.name) {
-                updateOrganization { value in
-                    for id in ids { value.membership[id] = folder.id }
-                    if let index = value.folders.firstIndex(where: { $0.id == folder.id }) {
-                        value.folders[index].collapsed = false
-                    }
-                }
-            }
+        ForEach(organization.folders.filter { folder in projectNodes.contains { $0.id == organization.parents?[folder.id] } }) { folder in
+            Button(groupLabel(folder)) { move(ids, to: folder.id) }
         }
-        Button("未分组") { updateOrganization { value in
-            for id in ids { value.membership[id] = nil }
-        } }
+        Button("未分组") { move(ids, to: nil) }
+    }
+
+    private var editorChoosesProject: Bool {
+        switch nameTarget {
+        case .narration, .folder(nil): return true
+        default: return false
+        }
     }
 
     private var editorShowsFolder: Bool {
-        if case .folder = nameTarget { return false }
-        return true
+        switch nameTarget {
+        case .narration, .audio: return true
+        default: return false
+        }
     }
 
     private var editorActionTitle: String {
@@ -383,12 +567,14 @@ struct ProjectSidebar: View {
     private var editorTitle: String {
         switch nameTarget {
         case .narration: return "新建配音"
+        case .audio: return "编辑配音"
         case .project(let id): return id == nil ? "新建项目" : "编辑项目"
         case .folder(let id): return id == nil ? "新建分组" : "编辑分组"
         }
     }
 
-    private func editName(_ target: NameTarget, current: String = "", folder: UUID? = nil) {
+    private func editName(_ target: NameTarget, current: String = "", folder: UUID? = nil, parent: UUID? = nil) {
+        parentProject = parent ?? folder.flatMap { organization.parents?[$0] } ?? activeContainer
         nameTarget = target; name = current; projectFolder = folder; nameError = nil; narrationText = ""; editingName = true
     }
 
@@ -398,21 +584,33 @@ struct ProjectSidebar: View {
         switch nameTarget {
         case .narration:
             guard let id = studio.newProject(title: title, narration: narrationText) else { return }
-            revealNewProject(id, step: .voice)
-        case .project(let id):
-            if let id {
-                guard studio.renameProject(id, to: title) else { return }
-                placeProject(id)
-            } else {
-                guard let id = studio.newProject(title: title.isEmpty ? nil : title) else {
-                    nameError = studio.error ?? "无法保存项目，请检查项目存储是否可用。"
-                    studio.error = nil
-                    return
+            if projectFolder == nil, let parentProject {
+                if let group = organization.folders.first(where: { $0.name == "默认分组" && organization.parents?[$0.id] == parentProject }) {
+                    projectFolder = group.id
+                } else {
+                    let group = SidebarOrganization.Folder(name: "默认分组")
+                    updateOrganization { value in
+                        value.folders.append(group)
+                        value.parents?[group.id] = parentProject
+                    }
+                    projectFolder = group.id
                 }
-                revealNewProject(id, step: .script)
             }
+            revealNewProject(id, step: .voice)
+        case .audio(let id):
+            guard studio.renameProject(id, to: title) else { return }
+            placeProject(id)
+        case .project(let id):
+            updateOrganization { value in
+                if let i = value.projects?.firstIndex(where: { $0.id == id }) {
+                    value.projects?[i].name = title
+                } else {
+                    value.projects?.append(.init(name: title.isEmpty ? "未命名项目" : title))
+                }
+            }
+            state.search = ""
         case .folder(let id):
-            guard !organization.folders.contains(where: { $0.id != id && $0.name.localizedCaseInsensitiveCompare(title) == .orderedSame }) else {
+            guard !organization.folders.contains(where: { $0.id != id && organization.parents?[$0.id] == (id.flatMap { organization.parents?[$0] } ?? parentProject) && $0.name.localizedCaseInsensitiveCompare(title) == .orderedSame }) else {
                 nameError = "已有同名分组。"
                 return
             }
@@ -420,7 +618,11 @@ struct ProjectSidebar: View {
                 if let index = value.folders.firstIndex(where: { $0.id == id }) {
                     value.folders[index].name = title
                 } else {
-                    value.folders.append(SidebarOrganization.Folder(name: title))
+                    guard let parentProject else { return }
+                    let folder = SidebarOrganization.Folder(name: title)
+                    value.folders.append(folder)
+                    value.parents?[folder.id] = parentProject
+                    if let i = value.projects?.firstIndex(where: { $0.id == parentProject }) { value.projects?[i].collapsed = false }
                 }
             }
         }
@@ -436,12 +638,9 @@ struct ProjectSidebar: View {
     }
 
     private func placeProject(_ id: UUID) {
-        updateOrganization { value in
-            value.membership[id] = projectFolder
-            if let i = value.folders.firstIndex(where: { $0.id == projectFolder }) {
-                value.folders[i].collapsed = false
-            }
-        }
+        move([id], to: projectFolder)
+        currentGroup = projectFolder
+        currentContainer = projectFolder.flatMap { organization.parents?[$0] } ?? projectNodes.first?.id
     }
 }
 
@@ -507,6 +706,16 @@ struct ProjectWorkspace: View {
                 StepInspector(state: state, project: project).frame(width: 280)
             }
             Divider()
+            if let failed = studio.failedSegments[project.id],
+               let index = project.segments.firstIndex(where: { $0.id == failed }), !studio.isWorking {
+                HStack {
+                    Text("第 \(index + 1) 段生成未完成").foregroundStyle(.orange)
+                    Spacer()
+                    Button("重试本段") { studio.generate(only: failed) }
+                    Button("继续剩余段落") { studio.prepareReview(); state.showReview = true }
+                    if !studio.diagnostic.isEmpty { Button("复制诊断") { studio.copyDiagnostic() } }
+                }.padding(10)
+            }
             WorkspaceFooter(state: state, project: project)
         }
     }
@@ -687,6 +896,7 @@ struct VoiceStep: View {
         case .openAI: return "表达要求作为朗读指令发送；tts-1 系列模型不使用。"
         }
     }
+    @State private var chosenPreset: VoicePreset?
     var body: some View {
         Form {
             Section("配音服务") {
@@ -701,6 +911,24 @@ struct VoiceStep: View {
                 }
                 if studio.catalog.profiles.first(where: { $0.id == service.id }) != service {
                     Button("应用最新服务配置") { studio.selectService(service.id) }
+                }
+            }
+            if !studio.presets.isEmpty {
+                Section("常用预设") {
+                    Menu("选择配音预设") {
+                        ForEach(studio.presets) { preset in Button(preset.name) { chosenPreset = preset } }
+                    }.disabled(studio.isWorking)
+                    if let preset = chosenPreset {
+                        LabeledContent("服务", value: "\(service.name) → \(preset.settings.resolvedService.name)")
+                        LabeledContent("音色", value: "\(project.settings.voice) → \(preset.settings.voice)")
+                        LabeledContent("语速", value: "\(project.settings.speed)× → \(preset.settings.speed)×")
+                        LabeledContent("段间停顿", value: "\(project.settings.pause) 秒 → \(preset.settings.pause) 秒")
+                        LabeledContent("场景", value: "\(project.settings.mode) → \(preset.settings.mode)")
+                        if project.settings.direction != preset.settings.direction { Text("表达指令也会更新。").font(.caption) }
+                        if project.levelsEnabled != preset.normalize { Text("响度匹配也会更新。").font(.caption) }
+                        Button("应用预设") { studio.applyPreset(preset, create: false); chosenPreset = nil }
+                            .disabled(studio.isWorking)
+                    }
                 }
             }
             Section("音色与节奏") {

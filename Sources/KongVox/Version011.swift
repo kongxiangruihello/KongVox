@@ -169,8 +169,10 @@ extension Studio {
         do {
             let urls = try currentURLs()
             let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.prompt = "选择文件夹"
+            configureDeliveryPanel(panel)
             guard panel.runModal() == .OK, let directory = panel.url else { return }
-            let destination = directory.appendingPathComponent("KongVox-短视频-" + BatchExport.safeName(String(p.title.prefix(30))))
+            rememberDeliveryFolder(directory)
+            let destination = directory.appendingPathComponent(deliveryName(p, format: "short-video"))
             guard !FileManager.default.fileExists(atPath: destination.path) else { throw VoxError(message: "目标文件夹已存在，请换一个位置。") }
             busy = true; stop(); status = "正在生成短视频交付包…"
             let folder = root

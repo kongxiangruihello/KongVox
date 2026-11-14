@@ -15,6 +15,8 @@ import UniformTypeIdentifiers
     @Published var pauseRequested = false
     @Published var activeProject: UUID?
     @Published var catalog = ServiceCatalog()
+    @Published var failedSegments: [UUID: UUID] = [:]
+    @Published var trashedProjects: [Project] = []
     @Published var projects: [Project] = [] { didSet { usageCache = nil } }
     @Published var selected: UUID? { didSet { usageCache = nil } }
     @Published var busy = false
@@ -129,6 +131,7 @@ import UniformTypeIdentifiers
         }
         migrateVersionsOutOfProjects()
         selected = projects.first?.id
+        loadTrash()
     }
     // MARK: Version snapshots (stored under Versions/, not in projects.json)
     func versionsFile(_ id: UUID) -> URL { root.appendingPathComponent("Versions").appendingPathComponent(id.uuidString + ".json") }
@@ -437,11 +440,13 @@ import UniformTypeIdentifiers
                         try projectStore.saveProject(updated)
                     } catch {
                         try? FileManager.default.removeItem(at: audio)
+                        failedSegments[snapshot.id] = segment.id
                         self.error = "项目保存失败：\(error.localizedDescription)"
                         status = "已保留合成音频，修复存储问题后可继续保存。"
                         return
                     }
                     projects[pi] = updated
+                    if failedSegments[snapshot.id] == segment.id { failedSegments[snapshot.id] = nil }
                     auditionTake = take
                     try? DownloadReceipt.clear(recovery)
                     progress = only == nil ? fullProgress : Double(offset + 1) / Double(pending.count)
@@ -451,7 +456,7 @@ import UniformTypeIdentifiers
                     }
                 } catch {
                     if Task.isCancelled { status = "已取消，完成的段落已保存。"; setTaskState(snapshot.id, "已暂停", status) }
-                    else { diagnostic = ServiceFailure.report(error); self.error = error.localizedDescription; status = "生成已暂停，点击生成即可继续未完成段落。"; setTaskState(snapshot.id, "失败待继续", diagnostic) }
+                    else { failedSegments[snapshot.id] = segment.id; diagnostic = ServiceFailure.report(error); self.error = error.localizedDescription; status = "生成已暂停，点击生成即可继续未完成段落。"; setTaskState(snapshot.id, "失败待继续", diagnostic) }
                     return
                 }
             }
@@ -549,12 +554,14 @@ import UniformTypeIdentifiers
         guard let player else { return }
         if player.isPlaying { player.pause(); playing = false } else { if let range = playbackRange, player.currentTime >= range.upperBound { player.currentTime = range.lowerBound } else if player.currentTime >= player.duration { player.currentTime = 0 }; playing = player.play() }
     }
-    func play(_ url: URL, cues: [PlaybackCue] = [], projectID: UUID? = nil) {
+    func play(_ url: URL, cues: [PlaybackCue] = [], projectID: UUID? = nil, from seconds: Double = 0) {
         stop()
         do {
             player = try AVAudioPlayer(contentsOf: url)
+            if let player { player.currentTime = min(max(0, seconds), max(0, player.duration - 0.01)) }
             guard player?.play() == true else { throw VoxError(message: "无法播放音频。") }
             playbackCues = cues; playbackProject = projectID; readingSegment = PlaybackTimeline.current(0, cues: cues)
+            playbackTime = player?.currentTime ?? 0
             playing = true; playbackDuration = player?.duration ?? 0
             playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
                 // Read the weak capture here, not inside the Task: Swift 5.10 rejects referencing a captured
@@ -617,14 +624,32 @@ import UniformTypeIdentifiers
     static var ffmpeg: URL? {
         ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"].first { FileManager.default.isExecutableFile(atPath: $0) }.map { URL(fileURLWithPath: $0) }
     }
+    func deliveryName(_ project: Project, format: String) -> String {
+        switch format {
+        case "zip": return project.title + "-音频与字幕.zip"
+        case "short-video": return "KongVox-短视频-" + BatchExport.safeName(String(project.title.prefix(30)))
+        default: return project.title + "." + format
+        }
+    }
+    func configureDeliveryPanel(_ panel: NSSavePanel) {
+        if let path = UserDefaults.standard.string(forKey: "KongVox.lastExportFolder"),
+           FileManager.default.fileExists(atPath: path) {
+            panel.directoryURL = URL(fileURLWithPath: path, isDirectory: true)
+        }
+    }
+    func rememberDeliveryFolder(_ directory: URL) {
+        UserDefaults.standard.set(directory.path, forKey: "KongVox.lastExportFolder")
+    }
     func exportSubtitles() {
         guard !isWorking, let p = project else { return }
         do {
             let urls = try currentURLs()
             let panel = NSSavePanel()
             panel.allowedContentTypes = [UTType(filenameExtension: "srt") ?? .plainText]
-            panel.nameFieldStringValue = p.title + ".srt"
+            panel.nameFieldStringValue = deliveryName(p, format: "srt")
+            configureDeliveryPanel(panel)
             guard panel.runModal() == .OK, let destination = panel.url else { return }
+            rememberDeliveryFolder(destination.deletingLastPathComponent())
             let folder = root
             busy = true; status = "正在计算字幕时间轴…"
             task = Task {
@@ -653,8 +678,10 @@ import UniformTypeIdentifiers
         do {
             let urls = try currentURLs()
             let panel = NSSavePanel(); panel.allowedContentTypes = [.zip]
-            panel.nameFieldStringValue = p.title + "-音频与字幕.zip"
+            panel.nameFieldStringValue = deliveryName(p, format: "zip")
+            configureDeliveryPanel(panel)
             guard panel.runModal() == .OK, let destination = panel.url else { return }
+            rememberDeliveryFolder(destination.deletingLastPathComponent())
             let folder = root
             busy = true; stop(); status = "正在导出音频与字幕组合包…"
             task = Task {
@@ -673,8 +700,10 @@ import UniformTypeIdentifiers
             let urls = try currentURLs()
             let panel = NSSavePanel()
             panel.allowedContentTypes = [format == "wav" ? .wav : format == "mp3" ? .mp3 : .mpeg4Audio]
-            panel.nameFieldStringValue = (project?.title ?? "KongVox") + "." + format
+            if let project { panel.nameFieldStringValue = deliveryName(project, format: format) }
+            configureDeliveryPanel(panel)
             guard panel.runModal() == .OK, let destination = panel.url else { return }
+            rememberDeliveryFolder(destination.deletingLastPathComponent())
             let gaps = project!.gaps; let normalize = project!.levelsEnabled; let seam = project!.resolvedSeam
             busy = true; stop(); status = "正在导出…"
             task = Task {

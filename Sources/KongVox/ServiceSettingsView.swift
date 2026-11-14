@@ -16,10 +16,37 @@ import AVFoundation
     @Published var testVoice = "Kore"
     var task: Task<Void, Never>?
     var player: AVAudioPlayer?
+    @Published var localStatus = ""
+    var recentResult: String? {
+        UserDefaults.standard.dictionary(forKey: "KongVox.serviceTestResults")?[profile.id] as? String
+    }
+
+    private func remember(_ result: String, service: ServiceProfile) {
+        var results = UserDefaults.standard.dictionary(forKey: "KongVox.serviceTestResults") ?? [:]
+        results[service.id] = Date().formatted(date: .abbreviated, time: .shortened) + " · " + result
+        UserDefaults.standard.set(results, forKey: "KongVox.serviceTestResults")
+    }
+
+    func checkLocalService() async {
+        guard profile.kind == .gptSoVITS else { return }
+        var address = profile
+        address.referenceAudioPath = "/reference.wav"
+        guard let validated = try? address.validated(),
+              let url = URL(string: validated.normalizedURL + "/openapi.json") else {
+            localStatus = "请输入有效的本机服务地址。"
+            return
+        }
+        localStatus = "正在检查本机服务…"
+        let result = try? await SpeechClient.secureSession.data(for: URLRequest(url: url, timeoutInterval: 3))
+        guard profile.kind == .gptSoVITS, profile.normalizedURL == validated.normalizedURL else { return }
+        let routes = result.flatMap { try? JSONSerialization.jsonObject(with: $0.0) as? [String: Any] }?["paths"] as? [String: Any]
+        localStatus = routes?["/tts"] != nil ? "本机服务已启动，检测到配音接口。" : "未检测到本机 GPT-SoVITS 配音服务。"
+    }
     func load(_ profile: ServiceProfile, defaultID: String) {
         cancel()
         self.profile = profile; voicesText = profile.voices.joined(separator: ", ")
         key = ""; removeKey = false; makeDefault = profile.id == defaultID
+        localStatus = ""
         testVoice = profile.voices.first ?? ""; message = ""; diagnostic = ""
     }
     func value() throws -> ServiceProfile {
@@ -65,9 +92,14 @@ import AVFoundation
                     guard player?.play() == true else { throw VoxError(message: "音频已生成，但无法播放。") }
                     if let file = recovery { try? DownloadReceipt.clear(file) }
                     message = needsKey ? "连接成功，正在试听。配置尚需点击保存。" : "本机合成成功，正在试听。配置尚需点击保存。"
-                } catch { diagnostic = ServiceFailure.report(error); message = Task.isCancelled ? "已取消试听。" : error.localizedDescription }
+                    remember("试听成功", service: service)
+                } catch {
+                    diagnostic = ServiceFailure.report(error)
+                    message = Task.isCancelled ? "已取消试听。" : error.localizedDescription
+                    if !Task.isCancelled { remember("试听失败 · " + ((error as? ServiceFailure)?.category ?? "音频或配置错误"), service: service) }
+                }
             }
-        } catch { message = error.localizedDescription }
+        } catch { message = error.localizedDescription; remember("配置检查失败", service: profile) }
     }
 }
 struct ServiceSettings: View {
@@ -99,6 +131,8 @@ struct ServiceSettings: View {
                         Button("阿里云 CosyVoice") { add(.cosyVoice) }
                         Button("阿里云 Qwen-TTS") { add(.qwenTTS) }
                         Button("OpenAI 兼容 API") { add(.openAI) }
+                        Button("本机 Qwen3-TTS") { add(.localQwen) }
+                        Button("本机 GPT-SoVITS") { add(.gptSoVITS) }
                     }
                     Text("切换前请保存当前修改。").font(.caption2).foregroundStyle(.secondary)
                     Spacer()
@@ -109,6 +143,7 @@ struct ServiceSettings: View {
                         configuration.disabled(editor.testing)
                         Divider()
                         Text("短句试听").font(.headline)
+                        if let result = editor.recentResult { Text("最近测试  " + result).font(.caption).foregroundStyle(.secondary) }
                         TextField("输入一段测试文稿", text: $editor.testText, axis: .vertical).lineLimit(2...4).disabled(editor.testing)
                         HStack {
                             Picker("测试声音", selection: $editor.testVoice) {
@@ -173,6 +208,7 @@ struct ServiceSettings: View {
                 }
             }
             if editor.profile.kind == .volcengine {
+                LabeledContent("试音资源与音色", value: editor.profile.model + " / " + editor.testVoice)
                 Text("新版使用豆包语音 API Key，AppID 留空；旧版填写 AppID，并在下方填写 Access Token。不是火山方舟的 Key，也不是云 AccessKey/SecretKey。切换 1.0 或复刻资源后，必须把 speaker ID 换成该资源已开通的音色。").font(.caption).foregroundStyle(.secondary)
                 if editor.profile.model == "seed-tts-2.0" {
                     Button("应用 VV / 2.0 默认音色") { applyVolcenginePreset(editor.profile.volcengineModelPresets[0]) }.font(.caption)
@@ -182,6 +218,10 @@ struct ServiceSettings: View {
                 Text("支持语速设置；本版暂不发送表达指令。中途失败不会采用残缺音频，重试可能重新计费。").font(.caption).foregroundStyle(.secondary)
                 Link("打开官方接口文档", destination: URL(string: "https://www.volcengine.com/docs/6561/1598757")!)
             } else if editor.profile.kind == .gptSoVITS {
+                HStack {
+                    Button("检查本机服务") { Task { await editor.checkLocalService() } }
+                    Text(editor.localStatus).font(.caption)
+                }.task(id: editor.profile.normalizedURL) { await editor.checkLocalService() }
                 TextField("参考音频绝对路径", text: Binding(get: { editor.profile.referenceAudioPath ?? "" }, set: { editor.profile.referenceAudioPath = $0 }))
                 TextField("参考音频对应的中文文稿", text: Binding(get: { editor.profile.referenceTranscript ?? "" }, set: { editor.profile.referenceTranscript = $0 }))
                 Text("先在本机启动 GPT-SoVITS API v2，再点击试听。每个服务配置使用一份参考音频。").font(.caption).foregroundStyle(.secondary)

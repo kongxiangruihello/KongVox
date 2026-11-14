@@ -65,13 +65,13 @@ struct MaintenanceDialogs: ViewModifier {
     var deleteTitle: String { studio.projects.first { $0.id == state.deleteID }?.title ?? "" }
     func body(content: Content) -> some View {
         content
-            .confirmationDialog("删除这个项目？", isPresented: Binding(get: { state.deleteID != nil }, set: { if !$0 { state.deleteID = nil } })) {
-                Button("删除项目", role: .destructive) {
-                    if let id = state.deleteID { studio.deleteProject(id) }
+            .confirmationDialog("将这条配音移到回收站？", isPresented: Binding(get: { state.deleteID != nil }, set: { if !$0 { state.deleteID = nil } })) {
+                Button("移到回收站", role: .destructive) {
+                    if let id = state.deleteID { studio.trashProjects([id]) }
                     state.deleteID = nil
                 }
             } message: {
-                Text("「\(deleteTitle)」将从列表移除，版本快照和下载缓存一并删除，无法撤销，建议先备份。音频文件暂时保留，可再用「清理未引用音频」释放空间。")
+                Text("「\(deleteTitle)」将从列表移除。文稿、音频与版本仍可从回收站恢复。")
             }
             .confirmationDialog("清理未引用的音频？", isPresented: Binding(get: { state.cleanupPlan != nil }, set: { if !$0 { state.cleanupPlan = nil } })) {
                 Button("删除 \(state.cleanupPlan?.files.count ?? 0) 个文件", role: .destructive) {

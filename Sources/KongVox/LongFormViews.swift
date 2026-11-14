@@ -16,7 +16,10 @@ struct GenerationReview: View {
             Text("确认本次生成范围").font(.title2.bold())
             if let p = studio.project {
                 let impact = GenerationImpact(p, selected: state.selected, force: state.force, ready: { studio.ready($0, in: p) }, recovery: { studio.hasRecovery($0) })
-                Text("\(p.settings.resolvedService.name) · \(p.settings.voice) · 提交正文按服务商实际计费").font(.caption)
+                let new = impact.pending.filter { id in p.segments.first(where: { $0.id == id }).map { !studio.hasRecovery($0) } ?? false }.count
+                let reused = p.segments.filter { state.selected.contains($0.id) && !impact.pending.contains($0.id) }.count
+                Text("\(p.settings.resolvedService.name) · \(p.settings.voice)" + (p.settings.resolvedService.kind.engine.requiresKey && new > 0 ? " · 新请求可能计费" : "")).font(.caption)
+                Text("复用 \(reused) 段 · 恢复 \(impact.pending.count - new) 段 · 新合成 \(new) 段").font(.headline)
                 Text("新请求 \(impact.generate) 字 · 恢复下载 \(impact.recover) 字 · 所选复用 \(impact.reuse) 字 · 未选保持 \(impact.untouched) 字").font(.headline)
                 Text("仅提交勾选且需要处理的内容；下方展开可核对词典替换后的完整读法。旧音频保留，批量重做不会删除历史。").font(.caption).foregroundStyle(.secondary)
                 HStack {
@@ -68,7 +71,12 @@ struct GenerationReview: View {
         if studio.ready(s, in: p) && !state.force { return "复用" }
         if studio.hasRecovery(s) { return "恢复下载" }
         if studio.ready(s, in: p) { return "主动重做" }
-        if s.current != nil { return "文稿/声音变更或文件缺失" }
+        if let take = s.current {
+            if !FileManager.default.fileExists(atPath: studio.audioURL(take).path) { return "音频文件缺失" }
+            if s.contextFingerprint != p.contextFingerprint(for: s.id) { return "前后文变更" }
+            if take.spokenText != p.settings.reading(s.spokenText) { return "正文或读音变更" }
+            return "声音设置变更"
+        }
         return "尚未生成或未采用"
     }
 }
