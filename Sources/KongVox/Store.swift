@@ -549,7 +549,7 @@ import UniformTypeIdentifiers
         status = "已采用所选版本，请重新检查成品。"
     }
     func cancel() { task?.cancel() }
-    func stop() { playbackRange = nil; repeatRange = false; playbackCues = []; readingSegment = nil; playbackProject = nil; player?.stop(); player = nil; playing = false; playbackTime = 0; playbackDuration = 0; playbackTimer?.invalidate(); playbackTimer = nil }
+    func stop() { rememberPlayback(); playbackRange = nil; repeatRange = false; playbackCues = []; readingSegment = nil; playbackProject = nil; player?.stop(); player = nil; playing = false; playbackTime = 0; playbackDuration = 0; playbackTimer?.invalidate(); playbackTimer = nil }
     func togglePause() {
         guard let player else { return }
         if player.isPlaying { player.pause(); playing = false } else { if let range = playbackRange, player.currentTime >= range.upperBound { player.currentTime = range.lowerBound } else if player.currentTime >= player.duration { player.currentTime = 0 }; playing = player.play() }
@@ -560,7 +560,7 @@ import UniformTypeIdentifiers
             player = try AVAudioPlayer(contentsOf: url)
             if let player { player.currentTime = min(max(0, seconds), max(0, player.duration - 0.01)) }
             guard player?.play() == true else { throw VoxError(message: "无法播放音频。") }
-            playbackCues = cues; playbackProject = projectID; readingSegment = PlaybackTimeline.current(0, cues: cues)
+            playbackCues = cues; playbackProject = projectID; readingSegment = PlaybackTimeline.current(player?.currentTime ?? 0, cues: cues)
             playbackTime = player?.currentTime ?? 0
             playing = true; playbackDuration = player?.duration ?? 0
             playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
@@ -600,7 +600,13 @@ import UniformTypeIdentifiers
         guard p.segments.allSatisfy({ ready($0, in: p) }) else { throw VoxError(message: "有未生成或已修改的段落，请先生成最新配音。") }
         return p.segments.compactMap { $0.current.map(audioURL) }
     }
-    func playAll(from segmentID: UUID? = nil) {
+    func rememberPlayback() {
+        guard let id = playbackProject, !playbackCues.isEmpty, playbackDuration > 0 else { return }
+        let seconds = playbackTime >= playbackDuration - 0.05 ? 0 : playbackTime
+        UserDefaults.standard.set(seconds, forKey: "KongVox.playback." + id.uuidString)
+    }
+
+    func playAll(from segmentID: UUID? = nil, resume: Bool = false) {
         guard !isWorking else { return }
         do {
             let urls = try currentURLs(); let snapshot = project!; let gaps = snapshot.gaps; let normalize = snapshot.levelsEnabled
@@ -614,8 +620,9 @@ import UniformTypeIdentifiers
                     let preview = root.appendingPathComponent("preview.wav")
                     let frames = try await Task.detached { try AudioAssembly.render(urls: urls, gaps: gaps, normalize: normalize, to: preview, seam: snapshot.resolvedSeam) }.value
                     let cues = try PlaybackTimeline.make(ids: snapshot.segments.map(\.id), frames: frames, gaps: gaps)
-                    play(preview, cues: cues, projectID: snapshot.id)
-                    if let segmentID, let cue = cues.first(where: { $0.id == segmentID }) { seek(cue.start) }
+                    let saved = resume ? UserDefaults.standard.double(forKey: "KongVox.playback." + snapshot.id.uuidString) : 0
+                    let start = segmentID.flatMap { id in cues.first(where: { $0.id == id })?.start } ?? saved
+                    play(preview, cues: cues, projectID: snapshot.id, from: start)
                     status = "正在试听完整配音。"
                 } catch { self.error = error.localizedDescription }
             }
@@ -623,6 +630,33 @@ import UniformTypeIdentifiers
     }
     static var ffmpeg: URL? {
         ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"].first { FileManager.default.isExecutableFile(atPath: $0) }.map { URL(fileURLWithPath: $0) }
+    }
+    struct LastDelivery: Codable {
+        let url: URL
+        let format: String
+    }
+    func lastDelivery(for id: UUID) -> LastDelivery? {
+        guard let data = UserDefaults.standard.data(forKey: "KongVox.delivery." + id.uuidString) else { return nil }
+        return try? JSONDecoder().decode(LastDelivery.self, from: data)
+    }
+    func rememberDelivery(_ url: URL, format: String, projectID: UUID) {
+        if let data = try? JSONEncoder().encode(LastDelivery(url: url, format: format)) {
+            UserDefaults.standard.set(data, forKey: "KongVox.delivery." + projectID.uuidString)
+        }
+    }
+    func repeatDelivery(_ delivery: LastDelivery) {
+        switch delivery.format {
+        case "zip": exportBundle(to: delivery.url)
+        case "srt": exportSubtitles(to: delivery.url)
+        case "short-video": exportShortVideoPackage(to: delivery.url)
+        default: export(format: delivery.format, to: delivery.url)
+        }
+    }
+    private func deliveryDestination(_ panel: NSSavePanel, preferred: URL?) -> URL? {
+        if let preferred { return preferred }
+        configureDeliveryPanel(panel)
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
     }
     func deliveryName(_ project: Project, format: String) -> String {
         switch format {
@@ -640,15 +674,14 @@ import UniformTypeIdentifiers
     func rememberDeliveryFolder(_ directory: URL) {
         UserDefaults.standard.set(directory.path, forKey: "KongVox.lastExportFolder")
     }
-    func exportSubtitles() {
+    func exportSubtitles(to preferred: URL? = nil) {
         guard !isWorking, let p = project else { return }
         do {
             let urls = try currentURLs()
             let panel = NSSavePanel()
             panel.allowedContentTypes = [UTType(filenameExtension: "srt") ?? .plainText]
             panel.nameFieldStringValue = deliveryName(p, format: "srt")
-            configureDeliveryPanel(panel)
-            guard panel.runModal() == .OK, let destination = panel.url else { return }
+            guard let destination = deliveryDestination(panel, preferred: preferred) else { return }
             rememberDeliveryFolder(destination.deletingLastPathComponent())
             let folder = root
             busy = true; status = "正在计算字幕时间轴…"
@@ -667,20 +700,20 @@ import UniformTypeIdentifiers
                         let content = try p.captionContent(frames: frames, pcm: pcm, root: folder)
                         try content.write(to: destination, atomically: true, encoding: .utf8)
                     }.value
+                    rememberDelivery(destination, format: "srt", projectID: p.id)
                     status = "已导出段落字幕：\(destination.lastPathComponent)"
                     NSWorkspace.shared.activateFileViewerSelecting([destination])
                 } catch { self.error = error.localizedDescription }
             }
         } catch { self.error = error.localizedDescription }
     }
-    func exportBundle() {
+    func exportBundle(to preferred: URL? = nil) {
         guard !isWorking, let p = project else { return }
         do {
             let urls = try currentURLs()
             let panel = NSSavePanel(); panel.allowedContentTypes = [.zip]
             panel.nameFieldStringValue = deliveryName(p, format: "zip")
-            configureDeliveryPanel(panel)
-            guard panel.runModal() == .OK, let destination = panel.url else { return }
+            guard let destination = deliveryDestination(panel, preferred: preferred) else { return }
             rememberDeliveryFolder(destination.deletingLastPathComponent())
             let folder = root
             busy = true; stop(); status = "正在导出音频与字幕组合包…"
@@ -688,23 +721,23 @@ import UniformTypeIdentifiers
                 defer { busy = false; task = nil }
                 do {
                     try await Task.detached { try ExportBundle.write(urls: urls, texts: p.segments.map(\.text), gaps: p.gaps, normalize: p.levelsEnabled, destination: destination, subtitleStyle: p.resolvedSubtitleStyle, captionProject: p, seam: p.resolvedSeam, root: folder) }.value
+                    rememberDelivery(destination, format: "zip", projectID: p.id)
                     status = "已导出同一版本的配音.wav 与配音.srt。"
                     NSWorkspace.shared.activateFileViewerSelecting([destination])
                 } catch { self.error = error.localizedDescription; status = "组合包导出失败，原文件未修改。" }
             }
         } catch { self.error = error.localizedDescription }
     }
-    func export(format: String) {
-        guard !isWorking else { return }
+    func export(format: String, to preferred: URL? = nil) {
+        guard !isWorking, let project else { return }
         do {
             let urls = try currentURLs()
             let panel = NSSavePanel()
             panel.allowedContentTypes = [format == "wav" ? .wav : format == "mp3" ? .mp3 : .mpeg4Audio]
-            if let project { panel.nameFieldStringValue = deliveryName(project, format: format) }
-            configureDeliveryPanel(panel)
-            guard panel.runModal() == .OK, let destination = panel.url else { return }
+            panel.nameFieldStringValue = deliveryName(project, format: format)
+            guard let destination = deliveryDestination(panel, preferred: preferred) else { return }
             rememberDeliveryFolder(destination.deletingLastPathComponent())
-            let gaps = project!.gaps; let normalize = project!.levelsEnabled; let seam = project!.resolvedSeam
+            let gaps = project.gaps; let normalize = project.levelsEnabled; let seam = project.resolvedSeam
             busy = true; stop(); status = "正在导出…"
             task = Task {
                 defer { busy = false; task = nil }
@@ -743,6 +776,7 @@ import UniformTypeIdentifiers
                     if FileManager.default.fileExists(atPath: destination.path) { _ = try FileManager.default.replaceItemAt(destination, withItemAt: staging) }
                     else { try FileManager.default.moveItem(at: staging, to: destination) }
                     status = "已导出：\(destination.lastPathComponent)"
+                    rememberDelivery(destination, format: format, projectID: project.id)
                     NSWorkspace.shared.activateFileViewerSelecting([destination])
                 } catch { self.error = error.localizedDescription; status = "导出失败，原文件未被替换。" }
             }

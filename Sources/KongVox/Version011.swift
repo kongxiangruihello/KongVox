@@ -164,22 +164,28 @@ extension Studio {
     func estimatedQueueCharacters() -> Int { queue.compactMap { entry in projects.first { $0.id == entry.projectID } }.reduce(0) { $0 + queueCharacters($1) } }
     func estimatedQueueCost() -> Double { Double(estimatedQueueCharacters()) / 10000.0 * batchBudget.yuanPerTenThousand }
 
-    func exportShortVideoPackage() {
+    func exportShortVideoPackage(to preferred: URL? = nil) {
         guard !isWorking, let p = project else { return }
         do {
             let urls = try currentURLs()
-            let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.prompt = "选择文件夹"
-            configureDeliveryPanel(panel)
-            guard panel.runModal() == .OK, let directory = panel.url else { return }
-            rememberDeliveryFolder(directory)
-            let destination = directory.appendingPathComponent(deliveryName(p, format: "short-video"))
-            guard !FileManager.default.fileExists(atPath: destination.path) else { throw VoxError(message: "目标文件夹已存在，请换一个位置。") }
+            let destination: URL
+            if let preferred {
+                destination = preferred
+            } else {
+                let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.prompt = "选择文件夹"
+                configureDeliveryPanel(panel)
+                guard panel.runModal() == .OK, let directory = panel.url else { return }
+                destination = directory.appendingPathComponent(deliveryName(p, format: "short-video"))
+                guard !FileManager.default.fileExists(atPath: destination.path) else { throw VoxError(message: "目标文件夹已存在，请换一个位置。") }
+            }
+            rememberDeliveryFolder(destination.deletingLastPathComponent())
             busy = true; stop(); status = "正在生成短视频交付包…"
             let folder = root
             task = Task {
                 defer { busy = false; task = nil }
                 do {
-                    try await Task.detached { try ShortVideoExport.write(p, urls: urls, root: folder, to: destination) }.value
+                    try await Task.detached { try ShortVideoExport.write(p, urls: urls, root: folder, to: destination, replace: preferred != nil) }.value
+                    rememberDelivery(destination, format: "short-video", projectID: p.id)
                     status = "短视频交付包已生成"; NSWorkspace.shared.activateFileViewerSelecting([destination])
                 } catch { self.error = error.localizedDescription }
             }
@@ -189,9 +195,9 @@ extension Studio {
 
 enum ShortVideoExport {
     /// Builds the package in a hidden sibling folder and moves it into place only when every file is written.
-    static func write(_ project: Project, urls: [URL], root: URL, to destination: URL) throws {
+    static func write(_ project: Project, urls: [URL], root: URL, to destination: URL, replace: Bool = false) throws {
         let fm = FileManager.default
-        guard !fm.fileExists(atPath: destination.path) else { throw VoxError(message: "目标文件夹已存在，请换一个位置。") }
+        guard replace || !fm.fileExists(atPath: destination.path) else { throw VoxError(message: "目标文件夹已存在，请换一个位置。") }
         let staging = destination.deletingLastPathComponent().appendingPathComponent(".kongvox-short-\(UUID())")
         try fm.createDirectory(at: staging, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: staging) }
@@ -206,6 +212,13 @@ enum ShortVideoExport {
         try "标题：\(project.resolvedTemplate.titleHint)\n项目：\(project.title)".write(to: staging.appendingPathComponent("标题页.txt"), atomically: true, encoding: .utf8)
         try "感谢观看\n\(project.title)".write(to: staging.appendingPathComponent("结尾页.txt"), atomically: true, encoding: .utf8)
         try "KongVox 短视频交付包\n模板：\(project.resolvedTemplate.rawValue)\n旁白：旁白.wav\n字幕：字幕.srt / 字幕.ass\n字幕时间：\(project.resolvedAlignment.rawValue)\n".write(to: staging.appendingPathComponent("交付清单.txt"), atomically: true, encoding: .utf8)
-        try fm.moveItem(at: staging, to: destination)
+        if replace && fm.fileExists(atPath: destination.path) {
+            guard fm.fileExists(atPath: destination.appendingPathComponent("交付清单.txt").path) else {
+                throw VoxError(message: "目标目录已被替换为其他内容，请另选导出位置。")
+            }
+            _ = try fm.replaceItemAt(destination, withItemAt: staging)
+        } else {
+            try fm.moveItem(at: staging, to: destination)
+        }
     }
 }

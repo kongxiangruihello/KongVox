@@ -20,6 +20,8 @@ struct DeliveryView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var state = DeliveryState()
     @AppStorage("KongVox.lastDeliveryFormat") private var lastFormat = "zip"
+    @State private var repeatTarget: Studio.LastDelivery?
+    @State private var confirmRepeat = false
     var initialFormat = "zip"
     var current: Bool { studio.project?.deliveryRevision == state.revision }
     var body: some View {
@@ -73,6 +75,18 @@ struct DeliveryView: View {
                     Text("\(studio.deliveryName(p, format: state.format)) · \(report.duration.map { Studio.timeLabel($0) } ?? "时长待就绪") · \(p.chapters.count) 章 · \(subtitleSummary)")
                         .font(.caption).textSelection(.enabled)
                 }
+                if let previous = studio.lastDelivery(for: p.id) {
+                    HStack {
+                        Text("上次：\(previous.url.path)").font(.caption).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Button("重新导出…") {
+                            if FileManager.default.fileExists(atPath: previous.url.path) {
+                                repeatTarget = previous; confirmRepeat = true
+                            } else { studio.repeatDelivery(previous) }
+                        }.disabled(!current || !state.checked || !report.audioReady || studio.isWorking ||
+                                   (["zip", "srt", "short-video"].contains(previous.format) && report.subtitleError != nil))
+                    }
+                }
                 HStack {
                     Picker("交付格式", selection: $state.format) {
                         Text("音频 + 字幕 ZIP").tag("zip"); Text("SRT 字幕").tag("srt")
@@ -94,10 +108,15 @@ struct DeliveryView: View {
             } else { Spacer() }
             Text(studio.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
         }.padding(24).frame(width: 940, height: 700)
-        .task { state.format = initialFormat == "zip" ? lastFormat : initialFormat; if state.format == "mp3" && Studio.ffmpeg == nil { state.format = "zip" }; await refresh() }
+        .task { state.format = initialFormat == "zip" ? (studio.selected.flatMap { studio.lastDelivery(for: $0)?.format } ?? lastFormat) : initialFormat; if state.format == "mp3" && Studio.ffmpeg == nil { state.format = "zip" }; await refresh() }
         .sheet(isPresented: $state.showRepair) { if let id = state.repairID { SegmentRepair(segmentID: id).environmentObject(studio) } }
         .sheet(isPresented: $state.showCaptions) { CaptionEditor().environmentObject(studio) }
         .sheet(isPresented: $state.showGenerate) { GenerationReview().environmentObject(studio) }
+        .confirmationDialog("覆盖上次导出的文件？", isPresented: $confirmRepeat) {
+            Button("覆盖并导出", role: .destructive) {
+                if let repeatTarget { studio.repeatDelivery(repeatTarget) }
+            }
+        } message: { Text(repeatTarget?.url.path ?? "") }
         .confirmationDialog("清除已保存的手工字幕？", isPresented: $state.confirmClearCaptions) {
             Button("清除并改用自动字幕", role: .destructive) { studio.clearCaptionEdits(); Task { await refresh() } }
         } message: { Text("音频和文稿不受影响。清除后无法撤销，除非恢复之前保存的项目版本。") }

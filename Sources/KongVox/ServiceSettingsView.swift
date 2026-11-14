@@ -17,6 +17,65 @@ import AVFoundation
     var task: Task<Void, Never>?
     var player: AVAudioPlayer?
     @Published var localStatus = ""
+    @Published var launching = false
+    @Published var launchScript = UserDefaults.standard.string(forKey: "KongVox.sovitsLauncher") ?? ""
+    private static var engineProcess: Process?
+
+    func chooseLauncher() {
+        let panel = NSOpenPanel()
+        panel.message = "选择你已安装的 GPT-SoVITS 启动脚本"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard ["command", "sh"].contains(url.pathExtension.lowercased()) else {
+            localStatus = "请选择 .command 或 .sh 启动脚本。"
+            return
+        }
+        launchScript = url.path
+        UserDefaults.standard.set(url.path, forKey: "KongVox.sovitsLauncher")
+    }
+
+    func launchService() async {
+        guard !launching, profile.kind == .gptSoVITS else { return }
+        launching = true
+        defer { launching = false }
+        if await localServiceReady() { localStatus = "本机服务已可用。"; return }
+        guard FileManager.default.isReadableFile(atPath: launchScript) else {
+            localStatus = "请先选择已安装的 GPT-SoVITS 启动脚本。"
+            return
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [launchScript]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            if Self.engineProcess?.isRunning != true {
+                try process.run()
+                Self.engineProcess = process
+            }
+            localStatus = "正在载入模型…"
+            for _ in 0..<30 {
+                if await localServiceReady() { localStatus = "本机服务已可用。"; return }
+                if let running = Self.engineProcess, !running.isRunning {
+                    localStatus = "启动脚本已退出（代码 \(running.terminationStatus)）。请在终端运行同一脚本查看详情。"
+                    return
+                }
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            localStatus = "等待本机接口超时。请核对脚本端口与服务地址。"
+        } catch { localStatus = "无法启动：\(error.localizedDescription)" }
+    }
+
+    private func localServiceReady() async -> Bool {
+        var address = profile
+        address.referenceAudioPath = "/reference.wav"
+        guard let validated = try? address.validated(),
+              let url = URL(string: validated.normalizedURL + "/openapi.json"),
+              let (data, response) = try? await SpeechClient.secureSession.data(for: URLRequest(url: url, timeoutInterval: 2)),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let schema = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let paths = schema["paths"] as? [String: Any] else { return false }
+        return paths["/tts"] != nil
+    }
     var recentResult: String? {
         UserDefaults.standard.dictionary(forKey: "KongVox.serviceTestResults")?[profile.id] as? String
     }
@@ -29,18 +88,11 @@ import AVFoundation
 
     func checkLocalService() async {
         guard profile.kind == .gptSoVITS else { return }
-        var address = profile
-        address.referenceAudioPath = "/reference.wav"
-        guard let validated = try? address.validated(),
-              let url = URL(string: validated.normalizedURL + "/openapi.json") else {
-            localStatus = "请输入有效的本机服务地址。"
-            return
-        }
+        let address = profile.normalizedURL
         localStatus = "正在检查本机服务…"
-        let result = try? await SpeechClient.secureSession.data(for: URLRequest(url: url, timeoutInterval: 3))
-        guard profile.kind == .gptSoVITS, profile.normalizedURL == validated.normalizedURL else { return }
-        let routes = result.flatMap { try? JSONSerialization.jsonObject(with: $0.0) as? [String: Any] }?["paths"] as? [String: Any]
-        localStatus = routes?["/tts"] != nil ? "本机服务已启动，检测到配音接口。" : "未检测到本机 GPT-SoVITS 配音服务。"
+        let ready = await localServiceReady()
+        guard !launching, profile.kind == .gptSoVITS, profile.normalizedURL == address else { return }
+        localStatus = ready ? "本机服务已可用。" : "未检测到本机 GPT-SoVITS 配音服务。"
     }
     func load(_ profile: ServiceProfile, defaultID: String) {
         cancel()
@@ -220,8 +272,10 @@ struct ServiceSettings: View {
             } else if editor.profile.kind == .gptSoVITS {
                 HStack {
                     Button("检查本机服务") { Task { await editor.checkLocalService() } }
-                    Text(editor.localStatus).font(.caption)
+                    Button("选择启动脚本…") { editor.chooseLauncher() }.disabled(editor.launching)
+                    Button("启动") { Task { await editor.launchService() } }.disabled(editor.launching || editor.launchScript.isEmpty)
                 }.task(id: editor.profile.normalizedURL) { await editor.checkLocalService() }
+                Text(editor.localStatus).font(.caption)
                 TextField("参考音频绝对路径", text: Binding(get: { editor.profile.referenceAudioPath ?? "" }, set: { editor.profile.referenceAudioPath = $0 }))
                 TextField("参考音频对应的中文文稿", text: Binding(get: { editor.profile.referenceTranscript ?? "" }, set: { editor.profile.referenceTranscript = $0 }))
                 Text("先在本机启动 GPT-SoVITS API v2，再点击试听。每个服务配置使用一份参考音频。").font(.caption).foregroundStyle(.secondary)

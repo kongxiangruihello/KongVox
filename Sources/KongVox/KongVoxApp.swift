@@ -25,7 +25,9 @@ extension FocusedValues {
 
 struct KongVoxApp: App {
     @FocusedValue(\.newSidebarProject) private var newSidebarProject
-    @StateObject private var studio = Studio()
+    @StateObject private var studio = Studio(root: ProcessInfo.processInfo.environment["KONGVOX_DATA_DIRECTORY"].map {
+        URL(fileURLWithPath: $0, isDirectory: true)
+    })
     @StateObject private var updater = AppUpdater()
     var body: some Scene {
         WindowGroup("KongVox") {
@@ -57,6 +59,8 @@ final class ViewState: ObservableObject {
     /// The step shown in the workspace: 文稿 → 声音 → 校对 → 导出.
     @Published var step: WorkStep = .script
     @Published var search = ""
+    @Published var sidebarPath = ""
+    @Published var sidebarReveal = UUID()
 }
 /// Confirmations for deleting a project and for removing unreferenced audio files.
 struct MaintenanceDialogs: ViewModifier {

@@ -46,9 +46,13 @@ extension Studio {
 }
 
 struct StudioView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject var studio: Studio
     @EnvironmentObject var updater: AppUpdater
     @StateObject private var state = ViewState()
+    @AppStorage("KongVox.lastRecording") private var lastRecording = ""
+    @AppStorage("KongVox.lastStep") private var lastStep = 0
+    @State private var restoredWorkspace = false
     var body: some View {
         NavigationSplitView {
             ProjectSidebar(state: state).navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 320)
@@ -60,7 +64,15 @@ struct StudioView: View {
             .background(Color(nsColor: .windowBackgroundColor))
         }
         .tint(Palette.accent)
-        .onAppear { state.showWelcome = !UserDefaults.standard.bool(forKey: "welcomeSeen05") }
+        .onAppear {
+            guard !restoredWorkspace else { return }
+            restoredWorkspace = true
+            if let id = UUID(uuidString: lastRecording), studio.projects.contains(where: { $0.id == id }) { studio.selected = id }
+            state.step = WorkStep(rawValue: lastStep) ?? .script
+            state.showWelcome = !UserDefaults.standard.bool(forKey: "welcomeSeen05")
+        }
+        .onChange(of: state.step) { step in lastStep = step.rawValue; studio.flushPendingSave() }
+        .onChange(of: scenePhase) { phase in if phase != .active { studio.flushPendingSave(); studio.rememberPlayback() } }
         .sheet(isPresented: $state.showWelcome, onDismiss: {
             if state.configureAfterWelcome { state.configureAfterWelcome = false; state.showSettings = true }
         }) {
@@ -76,8 +88,8 @@ struct StudioView: View {
         .sheet(isPresented: $state.showSettings) { ServiceSettings().environmentObject(studio) }
         .sheet(isPresented: $updater.showPanel) { UpdateView().environmentObject(updater).environmentObject(studio) }
         .task { updater.checkOnLaunch() }
-        .onChange(of: studio.selected) { _ in studio.stop(); studio.findings = []; studio.qualitySummary = "尚未检查"; studio.clearSpeechFindings() }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in studio.flushPendingSave() }
+        .onChange(of: studio.selected) { id in lastRecording = id?.uuidString ?? ""; studio.flushPendingSave(); studio.stop(); studio.findings = []; studio.qualitySummary = "尚未检查"; studio.clearSpeechFindings() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in studio.flushPendingSave(); studio.rememberPlayback() }
         .modifier(MaintenanceDialogs(state: state))
         .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) {
             Button("知道了") { studio.error = nil }
@@ -148,6 +160,7 @@ struct ProjectSidebar: View {
     @State private var currentGroup: UUID?
     @State private var showTrash = false
     @State private var dropTarget: UUID?
+    @State private var previousGroups: [UUID: UUID?] = [:]
     private var projectNodes: [SidebarOrganization.Folder] { (organization.projects ?? []).filter { $0.pinned == true } + (organization.projects ?? []).filter { $0.pinned != true } }
     private var activeContainer: UUID? {
         if let currentContainer, projectNodes.contains(where: { $0.id == currentContainer }) { return currentContainer }
@@ -188,9 +201,29 @@ struct ProjectSidebar: View {
             .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Palette.hairline))
             projectControls
+            ScrollViewReader { proxy in
             List(selection: managing ? .constant(nil) : $studio.selected) {
                 ForEach(projectNodes) { node in
-                    Section {
+                        groupHeader(node.pinned == true ? "📌 " + node.name : node.name, count: filtered.filter { item in
+                            (organization.membership[item.id].flatMap { organization.parents?[$0] } ?? organization.legacyProjectID) == node.id
+                        }.count, collapsed: node.collapsed) {
+                            currentContainer = node.id; currentGroup = nil
+                            guard query.isEmpty, !managing else { return }
+                            updateOrganization { value in
+                                if let i = value.projects?.firstIndex(where: { $0.id == node.id }) { value.projects?[i].collapsed.toggle() }
+                            }
+                        }
+                        .contextMenu {
+                            Button("在此项目新建分组…") { editName(.folder(nil), parent: node.id) }
+                            Button(node.pinned == true ? "取消置顶" : "置顶项目") {
+                                updateOrganization { value in
+                                    if let i = value.projects?.firstIndex(where: { $0.id == node.id }) { value.projects?[i].pinned = node.pinned != true }
+                                }
+                            }
+                            Button("编辑项目…") { editName(.project(node.id), current: node.name) }
+                            Button("删除项目…", role: .destructive) { projectToDelete = node.id }
+                                .disabled(projectNodes.count == 1)
+                        }
                         if !node.collapsed || !query.isEmpty || managing {
                             ForEach(organization.folders.filter { organization.parents?[$0.id] == node.id }) { folder in
                                 let items = filtered.filter { organization.membership[$0.id] == folder.id }
@@ -230,31 +263,16 @@ struct ProjectSidebar: View {
                                 }
                             }
                         }
-                    } header: {
-                        groupHeader(node.pinned == true ? "📌 " + node.name : node.name, count: filtered.filter { item in
-                            (organization.membership[item.id].flatMap { organization.parents?[$0] } ?? organization.legacyProjectID) == node.id
-                        }.count, collapsed: node.collapsed) {
-                            currentContainer = node.id; currentGroup = nil
-                            guard query.isEmpty, !managing else { return }
-                            updateOrganization { value in
-                                if let i = value.projects?.firstIndex(where: { $0.id == node.id }) { value.projects?[i].collapsed.toggle() }
-                            }
-                        }
-                        .contextMenu {
-                            Button("在此项目新建分组…") { editName(.folder(nil), parent: node.id) }
-                            Button(node.pinned == true ? "取消置顶" : "置顶项目") {
-                                updateOrganization { value in
-                                    if let i = value.projects?.firstIndex(where: { $0.id == node.id }) { value.projects?[i].pinned = node.pinned != true }
-                                }
-                            }
-                            Button("编辑项目…") { editName(.project(node.id), current: node.name) }
-                            Button("删除项目…", role: .destructive) { projectToDelete = node.id }
-                                .disabled(projectNodes.count == 1)
-                        }
-                    }
                 }
             }
             .listStyle(.sidebar).disabled(studio.isWorking)
+            .onChange(of: state.sidebarReveal) { _ in
+                guard let id = studio.selected else { return }
+                state.search = ""
+                expandPath(id)
+                DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) }
+            }
+            }
             VStack(spacing: 2) {
                 if let release = updater.availableRelease {
                     SidebarLink(title: "有新版本 \(release.version)", icon: "arrow.down.circle", tint: .orange) { updater.showPanel = true }
@@ -273,7 +291,10 @@ struct ProjectSidebar: View {
             }
         }
         .onChange(of: state.search) { _ in if managing { checked = [] } }
+        .onAppear { updateBreadcrumb(studio.selected) }
+        .onChange(of: savedOrganization) { _ in updateBreadcrumb(studio.selected) }
         .onChange(of: studio.selected) { id in
+            updateBreadcrumb(id)
             currentGroup = id.flatMap { organization.membership[$0] }
             currentContainer = currentGroup.flatMap { organization.parents?[$0] } ?? organization.legacyProjectID
         }
@@ -410,6 +431,7 @@ struct ProjectSidebar: View {
                     }
                 }
             }.disabled(!organization.folders.contains { folder in projectNodes.contains { $0.id == organization.parents?[folder.id] } })
+            if !previousGroups.isEmpty { Button("撤销移组") { undoMove() } }
             Button("回收站…") { showTrash = true }
             Button(managing ? "结束多选" : "多选配音") { managing.toggle(); checked = [] }
         } label: {
@@ -434,7 +456,6 @@ struct ProjectSidebar: View {
     private var projectControls: some View {
         VStack(spacing: 6) {
             HStack {
-                Text("项目").fontWeight(.semibold).foregroundStyle(.secondary)
                 Spacer()
                 Button { editName(.folder(nil)) } label: { Image(systemName: "folder.badge.plus") }
                     .help("新建分组").accessibilityLabel("新建分组")
@@ -492,7 +513,7 @@ struct ProjectSidebar: View {
                             Button("删除配音…", role: .destructive) { state.deleteID = project.id }
                         }
                 }
-            }.padding(.leading, grouped ? 28 : 0).tag(project.id)
+            }.padding(.leading, grouped ? 28 : 0).tag(project.id).id(project.id)
         }
     }
 
@@ -514,7 +535,32 @@ struct ProjectSidebar: View {
         return groupLabel(group)
     }
 
+    private func updateBreadcrumb(_ id: UUID?) {
+        state.sidebarPath = id.map { path(for: $0) } ?? ""
+    }
+
+    private func expandPath(_ id: UUID) {
+        updateOrganization { value in
+            let group = value.membership[id]
+            let parent = group.flatMap { value.parents?[$0] } ?? value.legacyProjectID
+            if let i = value.projects?.firstIndex(where: { $0.id == parent }) { value.projects?[i].collapsed = false }
+            if let i = value.folders.firstIndex(where: { $0.id == group }) { value.folders[i].collapsed = false }
+        }
+    }
+
+    private func undoMove() {
+        updateOrganization { value in
+            for (id, group) in previousGroups where studio.projects.contains(where: { $0.id == id }) {
+                value.membership[id] = group.flatMap { groupID in value.folders.contains { $0.id == groupID } ? groupID : nil }
+            }
+        }
+        previousGroups = [:]
+        if studio.selected != nil { state.sidebarReveal = UUID() }
+    }
+
     private func move(_ ids: Set<UUID>, to folder: UUID?) {
+        let changes = ids.filter { organization.membership[$0] != folder }
+        if !changes.isEmpty { previousGroups = Dictionary(uniqueKeysWithValues: changes.map { ($0, organization.membership[$0]) }) }
         updateOrganization { value in
             let destination = value.folders.firstIndex { $0.id == folder }
             for id in ids { value.membership[id] = destination.map { value.folders[$0].id } }
@@ -690,6 +736,14 @@ struct ProjectWorkspace: View {
     let project: Project
     var body: some View {
         VStack(spacing: 0) {
+            if !state.sidebarPath.isEmpty {
+                Button { state.sidebarReveal = UUID() } label: {
+                    Label(state.sidebarPath + " / " + project.title, systemImage: "sidebar.left")
+                        .lineLimit(1)
+                }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.top, 10)
+                    .help("在左栏定位此配音")
+            }
             WorkspaceHeader(state: state, project: project)
             Divider()
             HStack(spacing: 0) {
@@ -822,6 +876,13 @@ struct ScriptStep: View {
     @EnvironmentObject var studio: Studio
     @ObservedObject var state: ViewState
     let project: Project
+    @State private var showingReplace = false
+    @State private var find = ""
+    @State private var replacement = ""
+    private var matches: [String] {
+        guard !find.isEmpty else { return [] }
+        return project.fullText.components(separatedBy: "\n").filter { $0.contains(find) }
+    }
     var progressText: String {
         if studio.fullAudioReady { return "配音已就绪" }
         if project.isLongMode && project.needsLongPreparation { return "文稿有改动，待生成" }
@@ -839,10 +900,14 @@ struct ScriptStep: View {
                 Button { state.showBatch = true } label: { Label("导入文稿…", systemImage: "square.and.arrow.down") }
                     .help("读取 TXT、Markdown、Word 文件，每份文件建立一个项目")
                 Spacer()
+                if project.isLongMode { Button("查找与替换…") { showingReplace = true }.disabled(studio.isWorking) }
                 Text(progressText).font(.caption).foregroundStyle(.secondary)
             }
             if project.isLongMode {
-                TextEditor(text: Binding(get: { studio.project?.fullText ?? "" }, set: { text in studio.editLive { $0.longText = text } }))
+                ScriptTextEditor(projectID: project.id, text: Binding(get: { project.fullText }, set: { text in
+                    guard studio.selected == project.id else { return }
+                    studio.editLive { $0.longText = text }
+                }))
                     .font(.system(size: 16)).lineSpacing(7)
                     .scrollContentBackground(.hidden).padding(14)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Palette.surface))
@@ -878,7 +943,37 @@ struct ScriptStep: View {
         }
         .padding(.horizontal, 28).padding(.vertical, 18)
         .disabled(studio.isWorking)
+        .sheet(isPresented: $showingReplace) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("查找与替换").font(.headline)
+                TextField("查找文字", text: $find)
+                TextField("替换为（留空则移除）", text: $replacement)
+                Text("命中 \(matches.count) 行").font(.caption)
+                List(Array(matches.enumerated()), id: \.offset) { _, line in
+                    VStack(alignment: .leading) {
+                        Text(line)
+                        Text(line.replacingOccurrences(of: find, with: replacement)).foregroundStyle(.secondary)
+                    }.font(.caption)
+                }
+                HStack {
+                    Button("取消") { showingReplace = false }
+                    Spacer()
+                    Button("全部替换", action: replaceAll).disabled(matches.isEmpty || studio.isWorking)
+                }
+            }.padding(20).frame(width: 490, height: 380)
+        }
+
     }
+    func replaceAll() {
+        guard !find.isEmpty, studio.selected == project.id, !studio.isWorking else { return }
+        let old = project.fullText
+        let new = old.replacingOccurrences(of: find, with: replacement)
+        let affected = project.segments.filter { $0.text.contains(find) }.count
+        studio.edit { $0.longText = new }
+        studio.status = "已替换文稿；原有 \(affected) 段命中。可打开生成预览核对实际受影响段落。"
+        showingReplace = false
+    }
+
 }
 
 struct VoiceStep: View {
@@ -1242,7 +1337,7 @@ struct WorkspaceFooter: View {
     var body: some View {
         HStack(spacing: 14) {
             Button {
-                if studio.player != nil { studio.togglePause() } else { studio.playAll() }
+                if studio.player != nil { studio.togglePause() } else { studio.playAll(resume: true) }
             } label: {
                 Image(systemName: studio.playing ? "pause.fill" : "play.fill")
                     .font(.system(size: 14, weight: .semibold))
@@ -1263,6 +1358,11 @@ struct WorkspaceFooter: View {
                 LocalModelProgressView()
                 Text(studio.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 if studio.isWorking { ProgressView(value: studio.progress).frame(width: 180) }
+                if let active = studio.activeSegment, let index = project.segments.firstIndex(where: { $0.id == active }) {
+                    Text("第 \(index + 1) / \(project.segments.count) 段" + (studio.pauseRequested ? " · 保存后暂停" : " · 正在处理")).font(.caption2)
+                } else if let failed = studio.failedSegments[project.id], let index = project.segments.firstIndex(where: { $0.id == failed }) {
+                    Text("第 \(index + 1) 段待重试").font(.caption2).foregroundStyle(.orange)
+                }
             }
             Spacer(minLength: 12)
             actions

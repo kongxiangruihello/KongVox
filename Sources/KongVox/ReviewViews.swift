@@ -140,8 +140,13 @@ struct SegmentRepair: View {
                 Text("新版本先保留供对比，点击「采用」才进入成品。旧版本即使不匹配当前设置，仍可试听；关闭前请保存读法。").font(.caption).foregroundStyle(.secondary)
                 if let a = segment.current, let b = segment.takes.first(where: { $0.id != a.id }) {
                     HStack {
-                        Button("A · 当前采用") { compare(a) }
-                        Button("B · 候选版本") { compare(b) }
+                        Button(comparisonTake == a.id ? "▶ A · 当前采用" : "A · 当前采用") { compare(a) }.keyboardShortcut("1", modifiers: [])
+                        Button(comparisonTake == b.id ? "▶ B · 候选版本" : "B · 候选版本") { compare(b) }.keyboardShortcut("2", modifiers: [])
+                        Button(studio.playing ? "暂停" : "播放") {
+                            if comparisonTake != nil, studio.player != nil { studio.togglePause() } else { compare(a) }
+                        }.keyboardShortcut(.space, modifiers: [])
+                        Button("循环接缝") { comparisonTake = nil; studio.playSeam(after: segmentID) }
+                            .disabled(p.segments.last?.id == segmentID)
                         Button("采用 B") { studio.adoptTake(segmentID: segmentID, takeID: b.id) }
                             .disabled(dirty || !segment.matches(b, p.settings))
                         if studio.player != nil { PlaybackScrubber(clock: studio.clock, label: "A/B 试听进度") }
