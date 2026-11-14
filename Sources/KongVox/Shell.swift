@@ -115,10 +115,12 @@ struct ProjectSidebar: View {
     @State private var name = ""
     @State private var projectFolder: UUID?
     @State private var nameError: String?
+    @State private var narrationText = ""
     @State private var nameTarget: NameTarget = .folder(nil)
     @State private var confirmingDeletion = false
 
     private enum NameTarget {
+        case narration
         case folder(UUID?)
         case project(UUID?)
     }
@@ -147,8 +149,7 @@ struct ProjectSidebar: View {
                 BrandIcon(size: 28)
                 Text("KongVox").font(.system(size: 16, weight: .bold))
                 Spacer()
-                Button(action: { editName(.project(nil)) }) { Image(systemName: "plus").font(.system(size: 14, weight: .semibold)).frame(width: 28, height: 28) }
-                    .buttonStyle(.borderless).help("新建项目（⌘N）").accessibilityLabel("新建配音").disabled(studio.isWorking)
+                addMenu
             }
             .padding(.horizontal, 6)
             HStack(spacing: 6) {
@@ -177,12 +178,7 @@ struct ProjectSidebar: View {
                                 .contextMenu {
                                     Button("在此分组新建项目…") { editName(.project(nil), folder: folder.id) }
                                     Button("编辑分组…") { editName(.folder(folder.id), current: folder.name) }
-                                    Button("解散分组") {
-                                        updateOrganization {
-                                            $0.folders.removeAll { $0.id == folder.id }
-                                            $0.membership = $0.membership.filter { $0.value != folder.id }
-                                        }
-                                    }
+                                    Button("解散分组") { dissolve(folder.id) }
                                 }
                             }
                         }
@@ -227,7 +223,11 @@ struct ProjectSidebar: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text(editorTitle).font(.headline)
                 TextField("名称", text: $name)
-                if case .project = nameTarget {
+                if case .narration = nameTarget {
+                    Text("配音文稿").font(.caption)
+                    TextEditor(text: $narrationText).frame(minHeight: 130).accessibilityLabel("配音文稿")
+                }
+                if editorShowsFolder {
                     Picker("分组", selection: $projectFolder) {
                         Text("未分组").tag(nil as UUID?)
                         ForEach(organization.folders) { Text($0.name).tag(Optional($0.id)) }
@@ -238,7 +238,7 @@ struct ProjectSidebar: View {
                     Spacer()
                     Button("取消") { editingName = false }.keyboardShortcut(.cancelAction)
                     Button("保存", action: saveName).keyboardShortcut(.defaultAction)
-                        .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || studio.isWorking)
+                        .disabled(!canSaveName)
                 }
             }
             .padding(24)
@@ -251,6 +251,47 @@ struct ProjectSidebar: View {
             }
         } message: {
             Text("所选项目会从列表移除，音频文件暂时保留。")
+        }
+    }
+
+    private var addMenu: some View {
+        Menu {
+            Button("新建项目…", systemImage: "doc.badge.plus") { editName(.project(nil)) }
+            Button("新建分组…", systemImage: "folder.badge.plus") { editName(.folder(nil)) }
+            Button("新建配音…", systemImage: "waveform") {
+                editName(.narration, folder: studio.selected.flatMap { organization.membership[$0] })
+            }
+            Divider()
+            if let project = studio.project {
+                Button("编辑当前项目…", systemImage: "pencil") {
+                    editName(.project(project.id), current: project.title, folder: organization.membership[project.id])
+                }
+                Button("删除当前项目…", systemImage: "trash", role: .destructive) { state.deleteID = project.id }
+            }
+            Menu("管理分组") {
+                ForEach(organization.folders) { folder in
+                    Menu(folder.name) {
+                        Button("编辑分组…") { editName(.folder(folder.id), current: folder.name) }
+                        Button("解散分组", role: .destructive) { dissolve(folder.id) }
+                    }
+                }
+            }.disabled(organization.folders.isEmpty)
+            Button(managing ? "结束多选" : "多选项目") { managing.toggle(); checked = [] }
+        } label: {
+            Image(systemName: "plus").font(.system(size: 14, weight: .semibold)).frame(width: 28, height: 28)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("新建与管理")
+        .accessibilityLabel("新建与管理")
+        .disabled(studio.isWorking)
+    }
+
+    private func dissolve(_ id: UUID) {
+        updateOrganization {
+            $0.folders.removeAll { $0.id == id }
+            $0.membership = $0.membership.filter { $0.value != id }
         }
     }
 
@@ -338,42 +379,43 @@ struct ProjectSidebar: View {
         } }
     }
 
+    private var editorShowsFolder: Bool {
+        if case .folder = nameTarget { return false }
+        return true
+    }
+
+    private var canSaveName: Bool {
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !studio.isWorking else { return false }
+        if case .narration = nameTarget { return !narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return true
+    }
+
     private var editorTitle: String {
         switch nameTarget {
+        case .narration: return "新建配音"
         case .project(let id): return id == nil ? "新建项目" : "编辑项目"
         case .folder(let id): return id == nil ? "新建分组" : "编辑分组"
         }
     }
 
     private func editName(_ target: NameTarget, current: String = "", folder: UUID? = nil) {
-        nameTarget = target; name = current; projectFolder = folder; nameError = nil; editingName = true
+        nameTarget = target; name = current; projectFolder = folder; nameError = nil; narrationText = ""; editingName = true
     }
 
     private func saveName() {
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, !studio.isWorking else { return }
+        guard canSaveName else { return }
         switch nameTarget {
+        case .narration:
+            guard let id = studio.newProject(title: title, narration: narrationText) else { return }
+            revealNewProject(id, step: .voice)
         case .project(let id):
-            let projectID: UUID
             if let id {
                 guard studio.renameProject(id, to: title) else { return }
-                projectID = id
+                placeProject(id)
             } else {
                 guard let id = studio.newProject(title: title) else { return }
-                projectID = id
-                state.search = ""
-                state.step = .script
-                managing = false
-                checked = []
-            }
-            updateOrganization { value in
-                value.membership[projectID] = projectFolder
-                value.projectsCollapsed = false
-                if let i = value.folders.firstIndex(where: { $0.id == projectFolder }) {
-                    value.folders[i].collapsed = false
-                } else {
-                    value.ungroupedCollapsed = false
-                }
+                revealNewProject(id, step: .script)
             }
         case .folder(let id):
             guard !organization.folders.contains(where: { $0.id != id && $0.name.localizedCaseInsensitiveCompare(title) == .orderedSame }) else {
@@ -390,6 +432,26 @@ struct ProjectSidebar: View {
             }
         }
         editingName = false
+    }
+
+    private func revealNewProject(_ id: UUID, step: WorkStep) {
+        state.search = ""
+        state.step = step
+        managing = false
+        checked = []
+        placeProject(id)
+    }
+
+    private func placeProject(_ id: UUID) {
+        updateOrganization { value in
+            value.membership[id] = projectFolder
+            value.projectsCollapsed = false
+            if let i = value.folders.firstIndex(where: { $0.id == projectFolder }) {
+                value.folders[i].collapsed = false
+            } else {
+                value.ungroupedCollapsed = false
+            }
+        }
     }
 }
 

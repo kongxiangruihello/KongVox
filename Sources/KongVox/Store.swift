@@ -255,10 +255,14 @@ import UniformTypeIdentifiers
             return false
         }
     }
-    @discardableResult func newProject(title: String? = nil) -> UUID? {
+    @discardableResult func newProject(title: String? = nil, narration: String? = nil) -> UUID? {
         guard !isWorking, storageAvailable else { return nil }
         var project = makeProject()
         if let title { project.title = title }
+        if let narration {
+            project.longText = narration
+            project.prepareLongDocument()
+        }
         stop()
         projects.insert(project, at: 0)
         guard save() else { projects.removeAll { $0.id == project.id }; return nil }
