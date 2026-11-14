@@ -186,6 +186,7 @@ struct ProjectSidebar: View {
     @State private var showTrash = false
     @State private var trashSearch = ""
     @State private var trashSelection: Set<UUID> = []
+    @AppStorage("KongVox.ungroupedCollapsed") private var ungroupedCollapsed = false
     @State private var dropTarget: UUID?
     @State private var previousGroups: [UUID: UUID?] = [:]
     private var projectNodes: [SidebarOrganization.Folder] { (organization.projects ?? []).filter { $0.pinned == true } + (organization.projects ?? []).filter { $0.pinned != true } }
@@ -222,7 +223,7 @@ struct ProjectSidebar: View {
             .padding(.horizontal, 6)
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(.secondary)
-                TextField("搜索项目", text: $state.search).textFieldStyle(.plain).font(.system(size: 13))
+                TextField("搜索项目、分组或配音", text: $state.search).textFieldStyle(.plain).font(.system(size: 13))
             }
             .padding(.horizontal, 10).frame(height: 30)
             .background(RoundedRectangle(cornerRadius: 8).fill(Palette.surface))
@@ -255,7 +256,7 @@ struct ProjectSidebar: View {
                             ForEach(organization.folders.filter { organization.parents?[$0.id] == node.id }) { folder in
                                 let items = filtered.filter { organization.membership[$0.id] == folder.id }
                                 if query.isEmpty || !items.isEmpty {
-                                    groupHeader(folder.name, count: items.count, collapsed: folder.collapsed) {
+                                    groupHeader(folder.name, count: items.count, collapsed: folder.collapsed, isFolder: true) {
                                         currentContainer = node.id; currentGroup = folder.id
                                         guard query.isEmpty, !managing else { return }
                                         updateOrganization { value in
@@ -285,8 +286,10 @@ struct ProjectSidebar: View {
                             if node.id == organization.legacyProjectID {
                                 let loose = filtered.filter { organization.membership[$0.id] == nil }
                                 if !loose.isEmpty {
-                                    Label("未分组", systemImage: "folder").padding(.leading, 12)
-                                    projectRows(loose, grouped: true)
+                                    groupHeader("未分组", count: loose.count, collapsed: ungroupedCollapsed, isFolder: true) {
+                                        if query.isEmpty && !managing { ungroupedCollapsed.toggle() }
+                                    }.padding(.leading, 12)
+                                    if !ungroupedCollapsed || !query.isEmpty || managing { projectRows(loose, grouped: true) }
                                 }
                             }
                         }
@@ -537,13 +540,14 @@ struct ProjectSidebar: View {
         .padding(.horizontal, 6)
     }
 
-    private func groupHeader(_ title: String, count: Int, collapsed: Bool, toggle: @escaping () -> Void) -> some View {
+    private func groupHeader(_ title: String, count: Int, collapsed: Bool, isFolder: Bool = false, toggle: @escaping () -> Void) -> some View {
         Button(action: toggle) {
             HStack {
                 Image(systemName: collapsed && query.isEmpty && !managing ? "chevron.right" : "chevron.down")
-                Text(title).lineLimit(1)
+                if isFolder { Image(systemName: "folder").foregroundStyle(.secondary) }
+                Text(title).fontWeight(isFolder ? .medium : .semibold).lineLimit(1)
                 Spacer()
-                Text(count, format: .number)
+                Text(count, format: .number).monospacedDigit().foregroundStyle(.secondary)
             }
             .contentShape(Rectangle())
         }
@@ -624,6 +628,7 @@ struct ProjectSidebar: View {
     }
 
     private func expandPath(_ id: UUID) {
+        if organization.membership[id] == nil { ungroupedCollapsed = false }
         updateOrganization { value in
             let group = value.membership[id]
             let parent = group.flatMap { value.parents?[$0] } ?? value.legacyProjectID
@@ -780,7 +785,8 @@ struct ProjectRow: View {
     var body: some View {
         let progress = studio.progressState(project)
         VStack(alignment: .leading, spacing: 3) {
-            Text(project.title.isEmpty ? "未命名配音" : project.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
+            Label(project.title.isEmpty ? "未命名配音" : project.title, systemImage: "doc.text")
+                .font(.system(size: 13, weight: .medium)).lineLimit(1)
             HStack(spacing: 5) {
                 Circle().fill(progress.color).frame(width: 7, height: 7)
                 Text("\(progress.label) · \(project.fullText.count) 字").font(.caption).foregroundStyle(.secondary)
@@ -818,6 +824,7 @@ struct ProjectWorkspace: View {
     @EnvironmentObject var studio: Studio
     @ObservedObject var state: ViewState
     let project: Project
+    @AppStorage("KongVox.showInspector") private var showInspector = true
     var body: some View {
         VStack(spacing: 0) {
             if !state.sidebarPath.isEmpty {
@@ -828,7 +835,13 @@ struct ProjectWorkspace: View {
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.top, 10)
                     .help("在左栏定位此配音")
             }
-            WorkspaceHeader(state: state, project: project)
+            HStack(alignment: .top) {
+                WorkspaceHeader(state: state, project: project)
+                Button { showInspector.toggle() } label: { Image(systemName: "sidebar.right") }
+                    .help(showInspector ? "隐藏检查栏" : "显示检查栏")
+                    .accessibilityLabel(showInspector ? "隐藏检查栏" : "显示检查栏")
+                    .padding(.top, 16).padding(.trailing, 16)
+            }
             Divider()
             HStack(spacing: 0) {
                 Group {
@@ -840,8 +853,10 @@ struct ProjectWorkspace: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                Divider()
-                StepInspector(state: state, project: project).frame(width: 280)
+                if showInspector {
+                    Divider()
+                    StepInspector(state: state, project: project).frame(width: 280)
+                }
             }
             Divider()
             if let failed = studio.failedSegments[project.id],
@@ -874,7 +889,7 @@ struct WorkspaceHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                TextField("项目名称", text: studio.binding(\.title, fallback: ""))
+                TextField("配音名称", text: studio.binding(\.title, fallback: ""))
                     .font(.system(size: 22, weight: .bold)).textFieldStyle(.plain).frame(maxWidth: 440)
                     .disabled(studio.isWorking)
                 Text(meta).font(.caption).foregroundStyle(.secondary)
@@ -949,7 +964,7 @@ struct ProjectMenu: View {
             Image(systemName: "ellipsis")
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-        .help("项目操作").accessibilityLabel("项目操作")
+        .help("配音操作").accessibilityLabel("配音操作")
         .disabled(studio.isWorking)
     }
 }
@@ -1012,7 +1027,7 @@ struct ScriptStep: View {
                 ScriptTextEditor(projectID: project.id, text: Binding(get: { project.fullText }, set: { text in
                     guard studio.selected == project.id else { return }
                     studio.editLive { $0.longText = text }
-                }), jumpTo: $manuscriptJump)
+                }), jumpTo: $manuscriptJump, focusRequest: state.focusManuscript)
                     .font(.system(size: 16)).lineSpacing(7)
                     .scrollContentBackground(.hidden).padding(14)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Palette.surface))
@@ -1151,8 +1166,6 @@ struct VoiceStep: View {
                             .disabled(studio.isWorking)
                     }
                 }
-                Text(expressionNote).font(.caption).foregroundStyle(.secondary)
-                LabeledContent("模型") { Text(service.model).textSelection(.enabled).foregroundStyle(.secondary) }
                 if service.kind == .volcengine && service.model != "seed-tts-2.0" && project.settings.voice == ServiceProfile.volcVVVoice {
                     Text("当前资源与 VV 音色不匹配，请在服务设置中切换 2.0 或填写对应 speaker。").font(.caption).foregroundStyle(Palette.warn)
                 }
@@ -1198,12 +1211,10 @@ struct VoiceStep: View {
                     Text("舒缓 · 0.7 秒").tag(0.7)
                 }
             }
-            Section {
-                TextField("例如：像朋友聊天，重点处稍作强调", text: studio.binding(\.settings.direction, fallback: ""), axis: .vertical)
+            DisclosureGroup("高级设置") {
+                LabeledContent("模型") { Text(service.model).textSelection(.enabled) }
+                TextField("表达要求（可留空）", text: studio.binding(\.settings.direction, fallback: ""), axis: .vertical)
                     .lineLimit(3...6)
-            } header: {
-                Text("表达要求（可留空）")
-            } footer: {
                 Text(expressionNote).font(.caption).foregroundStyle(.secondary)
             }
             Section("合并与提醒") {
@@ -1224,6 +1235,15 @@ struct ReviewStep: View {
     var stale: Bool { project.isLongMode && project.needsLongPreparation }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if !studio.fullAudioReady {
+                if project.fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Notice(icon: "doc.text", text: "先写入或导入文稿，再生成配音。", color: .secondary)
+                    Button("去写文稿") { state.step = .script }
+                } else {
+                    Notice(icon: "waveform", text: "配音还未就绪。生成后可逐段校对和试听。", color: Palette.warn)
+                }
+                Spacer()
+            } else {
             HStack(spacing: 10) {
                 Text(studio.fullAudioReady ? "点击任一段，从该处播放。" : "生成全文后才能逐段试听。")
                     .font(.callout).foregroundStyle(.secondary)
@@ -1247,6 +1267,7 @@ struct ReviewStep: View {
                         }
                     }
                 }
+            }
             }
         }
         .padding(.horizontal, 28).padding(.vertical, 18)
@@ -1288,43 +1309,32 @@ struct ExportStep: View {
     let project: Project
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("选择导出内容").font(.headline)
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10), GridItem(.flexible())], spacing: 10) {
-                ExportChoice(title: "音频 + 字幕", detail: "ZIP：WAV 与 SRT，同一时间轴", format: "zip", state: state)
-                ExportChoice(title: "仅字幕", detail: "SRT，按当前字幕设置", format: "srt", state: state)
-                ExportChoice(title: "WAV", detail: "无损，适合剪辑", format: "wav", state: state)
-                ExportChoice(title: "M4A", detail: "体积小，便于分享", format: "m4a", state: state)
-                ExportChoice(title: "MP3", detail: Studio.ffmpeg == nil ? "需先安装 FFmpeg" : "通用格式", format: "mp3", state: state)
-                    .disabled(Studio.ffmpeg == nil)
+            if studio.fullAudioReady {
+                let preferred = studio.lastDelivery(for: project.id)?.format ?? "zip"
+                let format = preferred == "mp3" && Studio.ffmpeg == nil ? "zip" : preferred
+                Text("交付格式").font(.headline)
+                Text(studio.deliveryName(project, format: format)).textSelection(.enabled)
+                if studio.lastDelivery(for: project.id) != nil { Text("上次使用的格式").font(.caption).foregroundStyle(.secondary) }
+                Menu("更多格式") {
+                    ForEach(["zip", "srt", "wav", "m4a", "short-video"] + (Studio.ffmpeg == nil ? [] : ["mp3"]), id: \.self) { choice in
+                        Button(choice == "short-video" ? "短视频交付包" : choice.uppercased()) {
+                            state.exportFormat = choice; state.showDelivery = true
+                        }
+                    }
+                }.disabled(studio.isWorking)
+            } else {
+                let missing = project.segments.filter { !studio.ready($0, in: project) }.count
+                let needsPreparation = project.isLongMode && project.needsLongPreparation
+                let message = needsPreparation ? "文稿有改动，需先更新分段。" :
+                    missing > 0 ? "还有 \(missing) 段需要生成或更新。" : "请先写入文稿并生成配音。"
+                Notice(icon: "waveform", text: message, color: Palette.warn)
+                if !project.fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button("查看待生成段落") { studio.prepareReview(); state.showReview = true }.disabled(studio.isWorking)
+                }
             }
-            .disabled(!studio.fullAudioReady || studio.isWorking)
-            Text(studio.fullAudioReady
-                 ? "选择后打开交付检查：核对缺失片段、候选版本和字幕状态，再选择保存位置。字幕样式与对齐方式在交付检查中设置。"
-                 : "还有未生成或已过期的音频。先在「文稿」或「声音」中生成全文。")
-                .font(.callout).foregroundStyle(.secondary)
             Spacer()
         }
         .padding(.horizontal, 28).padding(.vertical, 18)
-    }
-}
-
-struct ExportChoice: View {
-    let title: String
-    let detail: String
-    let format: String
-    @ObservedObject var state: ViewState
-    var body: some View {
-        Button { state.exportFormat = format; state.showDelivery = true } label: {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.system(size: 14, weight: .semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading).padding(.horizontal, 14)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Palette.surface))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.hairline))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 }
 
@@ -1345,7 +1355,7 @@ struct StepInspector: View {
                 switch state.step {
                 case .script: scriptCards
                 case .voice: voiceCards
-                case .review: reviewCards
+                case .review: if studio.fullAudioReady { reviewCards }
                 case .export: exportCards
                 }
             }
@@ -1359,7 +1369,7 @@ struct StepInspector: View {
             InfoRow(label: "音色", value: project.settings.voice)
             InfoRow(label: "语速", value: String(format: "%.2f×", project.settings.speed))
         }
-        usageCard
+        if !project.fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { usageCard }
         InspectorCard("读音词典", actionTitle: "管理", action: { state.showTools = true }) {
             InfoRow(label: "本项目", value: "\((project.settings.pronunciationRules ?? []).count) 条")
             InfoRow(label: "全局", value: "\(studio.globalDictionary.count) 条")
@@ -1367,11 +1377,6 @@ struct StepInspector: View {
         }
     }
     @ViewBuilder var voiceCards: some View {
-        InspectorCard("试听") {
-            Text("先听开头约 20 秒，满意再生成全文。已生成的开头会复用。").font(.caption).foregroundStyle(.secondary)
-            Button("试听开头") { studio.generateOpening() }
-                .disabled(studio.isWorking || project.fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        }
         InspectorCard("音色收藏", actionTitle: "打开", action: { state.showPrecision = true }) {
             Text(studio.voiceFavorites.isEmpty ? "还没有收藏。可为常用音色起名，并用同一段文稿对比两个音色。" : "已收藏 \(studio.voiceFavorites.count) 个音色。")
                 .font(.caption).foregroundStyle(.secondary)
@@ -1508,7 +1513,7 @@ struct WorkspaceFooter: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 LocalModelProgressView()
-                Text(studio.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                Text(textEmpty && !studio.isWorking ? "写入或导入文稿后即可生成。" : studio.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 if studio.isWorking { ProgressView(value: studio.progress).frame(width: 180) }
                 if let active = studio.activeSegment, let index = project.segments.firstIndex(where: { $0.id == active }) {
                     Text("第 \(index + 1) / \(project.segments.count) 段" + (studio.pauseRequested ? " · 保存后暂停" : " · 正在处理")).font(.caption2)
@@ -1532,21 +1537,26 @@ struct WorkspaceFooter: View {
                 Button("取消生成") { if studio.queueRunning { studio.pauseQueue() }; studio.cancel() }
             }
         } else {
-            switch state.step {
-            case .script, .voice:
-                Button("试听开头") { studio.generateOpening() }.disabled(textEmpty)
+            if textEmpty {
+                Button("导入文稿…") { state.showBatch = true }
+                Button("开始写文稿") { state.step = .script; state.focusManuscript = UUID() }
+                    .buttonStyle(.borderedProminent)
+            } else if studio.fullAudioReady {
+                Button("检查并导出…") {
+                    state.exportFormat = studio.lastDelivery(for: project.id)?.format ?? "zip"
+                    if state.exportFormat == "mp3" && Studio.ffmpeg == nil { state.exportFormat = "zip" }
+                    state.showDelivery = true
+                }.buttonStyle(.borderedProminent)
+            } else {
+                if state.step == .script || state.step == .voice {
+                    Button("试听开头") { studio.generateOpening() }
+                }
                 generateButton.buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: .command)
-            case .review:
-                if !studio.fullAudioReady { generateButton }
-                Button("去导出") { state.step = .export }.buttonStyle(.borderedProminent).disabled(!studio.fullAudioReady)
-            case .export:
-                Button("导出…") { state.exportFormat = "zip"; state.showDelivery = true }
-                    .buttonStyle(.borderedProminent).disabled(!studio.fullAudioReady)
             }
         }
     }
     var generateButton: some View {
-        Button(project.isLongMode ? "生成全文" : "生成待更新") { studio.prepareReview(); state.showReview = true }
+        Button("预览并生成") { studio.prepareReview(); state.showReview = true }
             .help("确认生成范围后，生成所有待更新内容")
             .disabled(textEmpty)
     }

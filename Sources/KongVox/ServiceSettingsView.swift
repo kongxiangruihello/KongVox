@@ -173,6 +173,43 @@ struct ServiceSettings: View {
     @EnvironmentObject var studio: Studio
     @Environment(\.dismiss) var dismiss
     @StateObject private var editor = ServiceEditor()
+    private var hasChanges: Bool {
+        guard let profile = try? editor.value() else { return true }
+        return studio.catalog.profiles.first { $0.id == profile.id } != profile ||
+            editor.makeDefault != (profile.id == studio.catalog.defaultID) ||
+            !editor.key.isEmpty || editor.removeKey
+    }
+
+    private var serviceActions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+            if !editor.message.isEmpty { Text(editor.message).font(.callout).textSelection(.enabled) }
+            HStack {
+                if hasChanges { Text("有未保存修改").foregroundStyle(.orange) }
+                if let result = editor.recentResult { Text("最近测试 · " + result).foregroundStyle(.secondary) }
+                Spacer()
+                if !editor.diagnostic.isEmpty { Button("复制诊断") { editor.copyDiagnostic() } }
+                if editor.hasRecovery { Button("放弃下载缓存") { editor.discardCache = true }.disabled(editor.testing) }
+            }.font(.caption)
+            HStack {
+                Button("删除服务", role: .destructive) {
+                    do {
+                        try studio.deleteService(editor.profile.id)
+                        if let next = studio.catalog.profiles.first { editor.load(next, defaultID: studio.catalog.defaultID) }
+                    } catch { editor.message = error.localizedDescription }
+                }.disabled(editor.testing || !studio.catalog.profiles.contains { $0.id == editor.profile.id })
+                Spacer()
+                if editor.testing {
+                    ProgressView().controlSize(.small)
+                    Button("取消试听") { editor.cancel() }
+                } else {
+                    Button(editor.hasRecovery ? "继续下载并试听" : "测试并试听") { editor.test() }
+                }
+                Button("保存服务") { save() }.buttonStyle(.borderedProminent).disabled(editor.testing)
+            }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
@@ -181,12 +218,19 @@ struct ServiceSettings: View {
                 Button("完成") { editor.cancel(); dismiss() }.keyboardShortcut(.cancelAction)
             }
             HStack(alignment: .top, spacing: 22) {
+                ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(studio.catalog.profiles) { profile in
                         Button { editor.load(profile, defaultID: studio.catalog.defaultID) } label: {
                             VStack(alignment: .leading, spacing: 5) {
                                 HStack { Text(profile.name).font(.headline); if profile.id == studio.catalog.defaultID { Image(systemName: "star.fill").font(.caption) } }
                                 Text(profile.kind.rawValue + (profile.enabled ? "" : " · 已停用")).font(.caption).foregroundStyle(.secondary)
+                                if studio.project?.settings.resolvedService.id == profile.id {
+                                    Text("当前配音使用").font(.caption2).foregroundStyle(Color.accentColor)
+                                }
+                                if profile.id == editor.profile.id && profile.kind == .gptSoVITS && !editor.localStatus.isEmpty {
+                                    Text(editor.localStatus).font(.caption2).foregroundStyle(.secondary)
+                                }
                             }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
                                 .background(editor.profile.id == profile.id ? Color.indigo.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
                         }.buttonStyle(.plain)
@@ -203,6 +247,7 @@ struct ServiceSettings: View {
                     }
                     Text("切换前请保存当前修改。").font(.caption2).foregroundStyle(.secondary)
                     Spacer()
+                }
                 }.frame(width: 185).disabled(editor.testing)
                 Divider()
                 ScrollView {
@@ -210,33 +255,18 @@ struct ServiceSettings: View {
                         configuration.disabled(editor.testing)
                         Divider()
                         Text("短句试听").font(.headline)
-                        if let result = editor.recentResult { Text("最近测试  " + result).font(.caption).foregroundStyle(.secondary) }
                         TextField("输入一段测试文稿", text: $editor.testText, axis: .vertical).lineLimit(2...4).disabled(editor.testing)
                         HStack {
                             Picker("测试声音", selection: $editor.testVoice) {
                                 ForEach((try? editor.value().voices) ?? [editor.testVoice], id: \.self) { Text($0).tag($0) }
                             }.disabled(editor.testing)
-                            if editor.testing { ProgressView().controlSize(.small); Button("取消") { editor.cancel() } }
-                            else { Button(editor.hasRecovery ? "继续下载并试听" : "测试并试听") { editor.test() } }
                         }
                         Text("测试会发送上方短句至 \(editor.profile.endpointHost)，可能产生 API 费用。不会自动保存配置或修改项目。").font(.caption).foregroundStyle(.secondary)
                         LocalModelProgressView()
-                        if !editor.message.isEmpty { Text(editor.message).font(.callout).textSelection(.enabled) }
-                        HStack {
-                            if !editor.diagnostic.isEmpty { Button("复制诊断（不含密钥和文稿）") { editor.copyDiagnostic() } }
-                            if editor.hasRecovery { Button("放弃下载缓存") { editor.discardCache = true }.disabled(editor.testing) }
-                        }
-                        HStack {
-                            Button("删除服务", role: .destructive) {
-                                do { try studio.deleteService(editor.profile.id); if let next = studio.catalog.profiles.first { editor.load(next, defaultID: studio.catalog.defaultID) } }
-                                catch { editor.message = error.localizedDescription }
-                            }.disabled(!studio.catalog.profiles.contains { $0.id == editor.profile.id })
-                            Spacer()
-                            Button("保存服务") { save() }.buttonStyle(.borderedProminent)
-                        }.disabled(editor.testing)
                     }.textFieldStyle(.roundedBorder).padding(.trailing, 8)
                 }
             }
+            serviceActions
         }.padding(24).frame(width: 850, height: 690)
         .confirmationDialog("放弃已生成的下载结果？", isPresented: $editor.discardCache) {
             Button("放弃缓存", role: .destructive) { editor.clearRecovery() }

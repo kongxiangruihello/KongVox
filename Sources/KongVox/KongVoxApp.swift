@@ -60,6 +60,7 @@ final class ViewState: ObservableObject {
     @Published var step: WorkStep = .script
     @Published var search = ""
     @Published var sidebarPath = ""
+    @Published var focusManuscript: UUID?
     @Published var sidebarReveal = UUID()
 }
 /// Confirmations for deleting a project and for removing unreferenced audio files.

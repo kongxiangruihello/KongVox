@@ -5,6 +5,7 @@ struct ScriptTextEditor: NSViewRepresentable {
     let projectID: UUID
     @Binding var text: String
     @Binding var jumpTo: Int?
+    let focusRequest: UUID?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -26,6 +27,10 @@ struct ScriptTextEditor: NSViewRepresentable {
         guard let view = scroll.documentView as? NSTextView else { return }
         let coordinator = context.coordinator
         coordinator.text = $text
+        if let focusRequest, coordinator.focusRequest != focusRequest {
+            coordinator.focusRequest = focusRequest
+            DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
+        }
         let changed = coordinator.projectID != projectID
         if changed {
             coordinator.switchRecording(to: projectID)
@@ -49,6 +54,7 @@ struct ScriptTextEditor: NSViewRepresentable {
 
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>?
+        var focusRequest: UUID?
         private(set) var projectID: UUID?
         private var token: NSObjectProtocol?
         private var restoring = false
