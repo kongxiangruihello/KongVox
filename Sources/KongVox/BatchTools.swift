@@ -13,7 +13,37 @@ struct QueueEntry: Codable, Identifiable {
     var maxCharacters: Int?
     var maxYuan: Double?
 }
+struct BatchRun: Identifiable, Codable {
+    struct Result: Identifiable, Codable {
+        var id = UUID()
+        var title: String
+        var state: String
+        var segments: [String] = []
+        var diagnostic: String?
+    }
+    var id = UUID()
+    var started = Date()
+    var finished: Date?
+    var results: [Result] = []
+}
+
 extension Studio {
+    private var batchHistoryFile: URL { root.appendingPathComponent("batch-history.json") }
+
+    func loadBatchHistory() {
+        guard FileManager.default.fileExists(atPath: batchHistoryFile.path) else { return }
+        do { batchHistory = try JSONDecoder().decode([BatchRun].self, from: Data(contentsOf: batchHistoryFile)) }
+        catch { self.error = "批量运行历史读取失败：\(error.localizedDescription)" }
+    }
+
+    func recordBatchRun(_ run: BatchRun) {
+        let updated = Array(([run] + batchHistory.filter { $0.id != run.id }).prefix(30))
+        do {
+            try JSONEncoder().encode(updated).write(to: batchHistoryFile, options: .atomic)
+            batchHistory = updated
+        } catch { self.error = "批量运行历史保存失败：\(error.localizedDescription)" }
+    }
+
     func savePresets(_ values: [VoicePreset]) {
         guard !isWorking, storageAvailable else { return }
         do { try JSONEncoder().encode(values).write(to: root.appendingPathComponent("presets.json"), options: .atomic); presets = values }
@@ -77,14 +107,24 @@ extension Studio {
         guard saveQueue() else { return }
         queueRunning = true; queueStop = false; queueSkip = false; stop()
         queueTask = Task {
-            defer { queueRunning = false; queueTask = nil; queueStop = false; queueSkip = false }
+            var run = BatchRun()
+            recordBatchRun(run)
+            defer {
+                run.finished = Date()
+                recordBatchRun(run)
+                queueRunning = false; queueTask = nil; queueStop = false; queueSkip = false
+            }
             for i in queue.indices {
                 if queueStop { break }
                 if queueSkip {
                     queue[i].state = "已跳过"; queueSkip = false
+                    run.results.append(.init(title: projects.first { $0.id == queue[i].projectID }?.title ?? "未知配音", state: "已跳过"))
+                    recordBatchRun(run)
                     guard saveQueue() else { break }; continue
                 }
                 guard let p = projects.first(where: { $0.id == queue[i].projectID }) else {
+                    run.results.append(.init(title: "已移除配音", state: "项目不存在"))
+                    recordBatchRun(run)
                     queue[i].state = "项目不存在"; if !saveQueue() || !skipFailures { break }; continue
                 }
                 selected = p.id; error = nil; queue[i].state = "生成中"
@@ -95,6 +135,15 @@ extension Studio {
                 else if fullAudioReady { queue[i].state = "已完成" }
                 else if queueStop { queue[i].state = "已暂停" }
                 else { queue[i].state = "失败" }
+                let current = projects.first { $0.id == p.id } ?? p
+                let segments = current.segments.map { segment in
+                    if failedSegments[current.id] == segment.id { return "失败待重试" }
+                    if ready(segment, in: current) { return "已保存" }
+                    return DownloadReceipt.exists(recoveryFile(segment, project: current)) ? "待恢复" : "待生成"
+                }
+                run.results.append(.init(title: current.title, state: queue[i].state, segments: segments,
+                                         diagnostic: queue[i].state == "失败" ? (current.taskMessage ?? "请检查配音配置或项目存储。") : nil))
+                recordBatchRun(run)
                 guard saveQueue() else { break }
                 if queue[i].state == "失败" && !skipFailures { break }
             }

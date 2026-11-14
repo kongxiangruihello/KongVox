@@ -134,6 +134,11 @@ final class Version08Tests: XCTestCase {
         studio.startQueue(skipFailures: false); studio.skipQueueProject(); await studio.queueTask?.value
         XCTAssertEqual(studio.queue.map(\.state), ["已跳过", "已完成"])
         XCTAssertEqual(MockProtocol.count, 2)
+        let reopened = Studio(root: root)
+        XCTAssertEqual(reopened.batchHistory.count, 3)
+        XCTAssertEqual(reopened.batchHistory.first?.results.map(\.state), ["已跳过", "已完成"])
+        XCTAssertEqual(reopened.batchHistory.first?.results.last?.segments, ["已保存", "已保存"])
+        XCTAssertNotNil(reopened.batchHistory.last?.results.first?.diagnostic)
     }
     func testBatchExportAndRollback() throws {
         let root = try Version03Tests().temporary(); defer { try? FileManager.default.removeItem(at: root) }

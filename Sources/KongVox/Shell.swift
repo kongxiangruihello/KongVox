@@ -182,7 +182,10 @@ struct ProjectSidebar: View {
     @State private var parentProject: UUID?
     @State private var currentContainer: UUID?
     @State private var currentGroup: UUID?
+    @State private var showRecent = false
     @State private var showTrash = false
+    @State private var trashSearch = ""
+    @State private var trashSelection: Set<UUID> = []
     @State private var dropTarget: UUID?
     @State private var previousGroups: [UUID: UUID?] = [:]
     private var projectNodes: [SidebarOrganization.Folder] { (organization.projects ?? []).filter { $0.pinned == true } + (organization.projects ?? []).filter { $0.pinned != true } }
@@ -323,9 +326,27 @@ struct ProjectSidebar: View {
             currentContainer = currentGroup.flatMap { organization.parents?[$0] } ?? organization.legacyProjectID
         }
         .onChange(of: studio.projects.map(\.id)) { ids in checked.formIntersection(ids) }
+        .sheet(isPresented: $showRecent) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack { Text("近期工作").font(.headline); Spacer(); Button("完成") { showRecent = false } }
+                List(recentRecordings) { item in
+                    Button {
+                        studio.selected = item.id
+                        state.sidebarReveal = UUID()
+                        showRecent = false
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(item.title)
+                            Text(path(for: item.id) + " · " + recentStatus(item)).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }.buttonStyle(.plain)
+                }
+            }.padding(20).frame(width: 460, height: 360)
+        }
         .sheet(isPresented: $showTrash) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack { Text("回收站").font(.headline); Spacer(); Button("完成") { showTrash = false } }
+                TextField("搜索原路径或配音名称", text: $trashSearch)
                 if studio.trashedProjects.isEmpty && (organization.archivedProjects ?? []).isEmpty {
                     Text("回收站为空。").foregroundStyle(.secondary)
                 }
@@ -347,8 +368,9 @@ struct ProjectSidebar: View {
                 }
                 List(studio.trashedProjects.filter { item in
                     let parent = organization.membership[item.id].flatMap { organization.parents?[$0] } ?? organization.legacyProjectID
-                    return !(organization.archivedProjects ?? []).contains { $0.id == parent }
-                }) { item in
+                    return !(organization.archivedProjects ?? []).contains { $0.id == parent } &&
+                        (trashSearch.isEmpty || (path(for: item.id) + " / " + item.title).localizedCaseInsensitiveContains(trashSearch))
+                }, selection: $trashSelection) { item in
                     HStack {
                         VStack(alignment: .leading) {
                             Text(item.title)
@@ -362,8 +384,18 @@ struct ProjectSidebar: View {
                             }
                         }
                     }
+                    .tag(item.id)
                 }
-            }.padding(20).frame(width: 440, height: 300)
+                if !trashSelection.isEmpty {
+                    Text("同名配音保留为独立条目。").font(.caption).foregroundStyle(.secondary)
+                    Button("恢复所选 \(trashSelection.count) 条") {
+                        if studio.restoreProjects(trashSelection) {
+                            if let id = studio.selected { expandPath(id) }
+                            trashSelection = []
+                        }
+                    }
+                }
+            }.padding(20).frame(width: 440, height: 340)
         }
         .focusedSceneValue(\.newSidebarProject, { editName(.project(nil)) })
         .sheet(isPresented: $editingName) {
@@ -456,7 +488,8 @@ struct ProjectSidebar: View {
                 }
             }.disabled(!organization.folders.contains { folder in projectNodes.contains { $0.id == organization.parents?[folder.id] } })
             if !previousGroups.isEmpty { Button("撤销移组") { undoMove() } }
-            Button("回收站…") { showTrash = true }
+            Button("近期工作…") { showRecent = true }
+            Button("回收站…") { trashSearch = ""; trashSelection = []; showTrash = true }
             Button(managing ? "结束多选" : "多选配音") { managing.toggle(); checked = [] }
         } label: {
             Image(systemName: "plus").font(.system(size: 14, weight: .semibold)).frame(width: 28, height: 28)
@@ -532,6 +565,10 @@ struct ProjectSidebar: View {
                         .draggable(project.id.uuidString)
                         .contextMenu {
                             Button("编辑配音…") { editName(.audio(project.id), current: project.title, folder: organization.membership[project.id]) }
+                            Menu("复制配音") {
+                                Button("复制文稿与设置") { duplicate(project.id, includeAudio: false) }
+                                Button("同时复用已生成音频") { duplicate(project.id, includeAudio: true) }
+                            }
                             Menu("移到分组") { moveOptions([project.id]) }
                             Divider()
                             Button("删除配音…", role: .destructive) { state.deleteID = project.id }
@@ -557,6 +594,29 @@ struct ProjectSidebar: View {
             return (projectNodes.first { $0.id == organization.legacyProjectID }?.name ?? "已有配音") + " / 未分组"
         }
         return groupLabel(group)
+    }
+
+    private var recentRecordings: [Project] {
+        let dates = studio.projects.map { item in
+            let file = studio.root.appendingPathComponent("Projects/\(item.id.uuidString).json")
+            return (item, (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+        }
+        return dates.sorted { $0.1 > $1.1 }.prefix(25).map { $0.0 }
+    }
+
+    private func recentStatus(_ item: Project) -> String {
+        if let state = item.taskState, state.contains("失败") { return state }
+        if studio.progressState(item) == .ready && studio.lastDelivery(for: item.id) == nil { return "待导出" }
+        return studio.progressState(item).label
+    }
+
+    private func duplicate(_ id: UUID, includeAudio: Bool) {
+        let group = organization.membership[id]
+        guard let copy = studio.duplicateRecording(id, includeAudio: includeAudio) else { return }
+        move([copy], to: group)
+        state.search = ""
+        state.step = .script
+        state.sidebarReveal = UUID()
     }
 
     private func updateBreadcrumb(_ id: UUID?) {
@@ -774,7 +834,7 @@ struct ProjectWorkspace: View {
                 Group {
                     switch state.step {
                     case .script: ScriptStep(state: state, project: project)
-                    case .voice: VoiceStep(project: project)
+                    case .voice: VoiceStep(project: project).id(project.id)
                     case .review: ReviewStep(state: state, project: project)
                     case .export: ExportStep(state: state, project: project)
                     }
@@ -901,11 +961,20 @@ struct ScriptStep: View {
     @ObservedObject var state: ViewState
     let project: Project
     @State private var showingReplace = false
+    @State private var showingDiff = false
+    @State private var diff = [ManuscriptChange]()
+    @State private var manuscriptJump: Int?
     @State private var find = ""
     @State private var replacement = ""
     private var matches: [String] {
         guard !find.isEmpty else { return [] }
         return project.fullText.components(separatedBy: "\n").filter { $0.contains(find) }
+    }
+    private var oversizedLines: Int {
+        guard project.isLongMode else { return 0 }
+        return project.fullText.split(whereSeparator: \.isNewline).filter {
+            $0.count > project.chunkLimit
+        }.count
     }
     var progressText: String {
         if studio.fullAudioReady { return "配音已就绪" }
@@ -925,13 +994,25 @@ struct ScriptStep: View {
                     .help("读取 TXT、Markdown、Word 文件，每份文件建立一个项目")
                 Spacer()
                 if project.isLongMode { Button("查找与替换…") { showingReplace = true }.disabled(studio.isWorking) }
+                if let baseline = project.lastGeneratedManuscript, project.isLongMode {
+                    Button("与上次生成对比…") {
+                        diff = ManuscriptChange.compare(baseline, project.fullText)
+                        showingDiff = true
+                    }
+                }
                 Text(progressText).font(.caption).foregroundStyle(.secondary)
+            }
+            if oversizedLines > 0 {
+                HStack {
+                    Text("\(oversizedLines) 行超过当前服务的 \(project.chunkLimit) 字分段上限。").foregroundStyle(.orange)
+                    Button("预览分段…") { studio.prepareReview(); state.showReview = true }
+                }.font(.caption)
             }
             if project.isLongMode {
                 ScriptTextEditor(projectID: project.id, text: Binding(get: { project.fullText }, set: { text in
                     guard studio.selected == project.id else { return }
                     studio.editLive { $0.longText = text }
-                }))
+                }), jumpTo: $manuscriptJump)
                     .font(.system(size: 16)).lineSpacing(7)
                     .scrollContentBackground(.hidden).padding(14)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Palette.surface))
@@ -967,6 +1048,34 @@ struct ScriptStep: View {
         }
         .padding(.horizontal, 28).padding(.vertical, 18)
         .disabled(studio.isWorking)
+        .sheet(isPresented: $showingDiff) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("与上次生成的文稿对比").font(.headline)
+                    Spacer(); Button("完成") { showingDiff = false }
+                }
+                if diff.isEmpty { Text("文稿没有改动。") }
+                List(Array(diff.enumerated()), id: \.offset) { _, change in
+                    HStack(alignment: .top) {
+                        Label(change.added ? "新增" : "删除", systemImage: change.added ? "plus.circle" : "minus.circle")
+                            .foregroundStyle(change.added ? .green : .red)
+                        Text(change.text).textSelection(.enabled)
+                        Spacer()
+                        if let offset = change.offset {
+                            Button(change.added ? "定位原文" : "定位删除处") {
+                                showingDiff = false
+                                manuscriptJump = offset
+                            }
+                        }
+                    }
+                }
+                Button("查看生成影响…") {
+                    showingDiff = false
+                    studio.prepareReview()
+                    DispatchQueue.main.async { state.showReview = true }
+                }
+            }.padding(20).frame(width: 620, height: 420)
+        }
         .sheet(isPresented: $showingReplace) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("查找与替换").font(.headline)
@@ -982,13 +1091,14 @@ struct ScriptStep: View {
                 HStack {
                     Button("取消") { showingReplace = false }
                     Spacer()
-                    Button("全部替换", action: replaceAll).disabled(matches.isEmpty || studio.isWorking)
+                    Button("全部替换") { replaceAll() }.disabled(matches.isEmpty || studio.isWorking)
+                    Button("替换并预览生成") { replaceAll(preview: true) }.disabled(matches.isEmpty || studio.isWorking)
                 }
             }.padding(20).frame(width: 490, height: 380)
         }
 
     }
-    func replaceAll() {
+    func replaceAll(preview: Bool = false) {
         guard !find.isEmpty, studio.selected == project.id, !studio.isWorking else { return }
         let old = project.fullText
         let new = old.replacingOccurrences(of: find, with: replacement)
@@ -996,6 +1106,7 @@ struct ScriptStep: View {
         studio.edit { $0.longText = new }
         studio.status = "已替换文稿；原有 \(affected) 段命中。可打开生成预览核对实际受影响段落。"
         showingReplace = false
+        if preview { studio.prepareReview(); state.showReview = true }
     }
 
 }
@@ -1016,14 +1127,31 @@ struct VoiceStep: View {
         }
     }
     @State private var chosenPreset: VoicePreset?
+    @State private var proposedService: ServiceProfile?
     var body: some View {
         Form {
             Section("配音服务") {
-                Picker("服务", selection: Binding(get: { service.id }, set: { studio.selectService($0) })) {
+                Picker("服务", selection: Binding(get: { proposedService?.id ?? service.id }, set: { id in
+                    proposedService = studio.catalog.profiles.first { $0.id == id && $0.enabled && $0.id != service.id }
+                })) {
                     ForEach(studio.catalog.profiles.filter { $0.enabled || $0.id == service.id }) { profile in
                         Text(profile.name + (profile.enabled ? "" : "（已停用）")).tag(profile.id)
                     }
                 }
+                if let proposedService {
+                    let before = service.voiceCapabilities(voice: project.settings.voice, direction: project.settings.direction)
+                    let after = proposedService.voiceCapabilities(voice: proposedService.voices.first ?? "", direction: project.settings.direction)
+                    LabeledContent("语速", value: before.speed + " → " + after.speed)
+                    LabeledContent("前后文", value: before.context + " → " + after.context)
+                    LabeledContent("表达", value: before.expression + " → " + after.expression)
+                    LabeledContent("音色", value: project.settings.voice + " → " + (proposedService.voices.first ?? "未配置"))
+                    HStack {
+                        Button("取消切换") { self.proposedService = nil }
+                        Button("确认切换") { studio.selectService(proposedService.id); self.proposedService = nil }
+                            .disabled(studio.isWorking)
+                    }
+                }
+                Text(expressionNote).font(.caption).foregroundStyle(.secondary)
                 LabeledContent("模型") { Text(service.model).textSelection(.enabled).foregroundStyle(.secondary) }
                 if service.kind == .volcengine && service.model != "seed-tts-2.0" && project.settings.voice == ServiceProfile.volcVVVoice {
                     Text("当前资源与 VV 音色不匹配，请在服务设置中切换 2.0 或填写对应 speaker。").font(.caption).foregroundStyle(Palette.warn)

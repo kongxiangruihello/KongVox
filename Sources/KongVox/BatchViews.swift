@@ -23,11 +23,12 @@ struct BatchWorkbench: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack { Text("批量工作台").font(.title2.bold()); Spacer(); Button("完成") { dismiss() } }
             Picker("工作内容", selection: $state.tab) {
-                ForEach(["导入文稿", "生成队列", "配音预设", "批量导出"], id: \.self) { Text($0) }
+                ForEach(["导入文稿", "生成队列", "配音预设", "批量导出", "运行历史"], id: \.self) { Text($0) }
             }.pickerStyle(.segmented)
             if state.tab == "导入文稿" { importView }
             else if state.tab == "生成队列" { queueView }
             else if state.tab == "配音预设" { presetView }
+            else if state.tab == "运行历史" { historyView }
             else { exportView }
             Text(studio.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
         }.padding(24).frame(width: 850, height: 650)
@@ -36,6 +37,25 @@ struct BatchWorkbench: View {
             Button("按所列顺序开始生成") { studio.startQueue(skipFailures: state.skipFailures) }
         } message: { Text("将依次向每个项目选择的服务提交待处理文字，按服务账户计费。已完成且未修改的音频会复用，失败项目不会自动重试。") }
     }
+    private var historyView: some View {
+        List {
+            if studio.batchHistory.isEmpty { Text("暂无批量运行记录。") }
+            ForEach(studio.batchHistory) { run in
+                DisclosureGroup(run.started.formatted(date: .abbreviated, time: .shortened) +
+                                " · \(run.results.count) 条结果" + (run.finished == nil ? " · 未结束" : "")) {
+                    ForEach(run.results) { result in
+                        DisclosureGroup(result.title + " · " + result.state) {
+                            if let diagnostic = result.diagnostic { Text(diagnostic).textSelection(.enabled) }
+                            ForEach(Array(result.segments.enumerated()), id: \.offset) { index, status in
+                                LabeledContent("第 \(index + 1) 段", value: status)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     var importView: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {

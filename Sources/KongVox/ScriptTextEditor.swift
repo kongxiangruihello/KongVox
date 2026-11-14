@@ -4,6 +4,7 @@ import SwiftUI
 struct ScriptTextEditor: NSViewRepresentable {
     let projectID: UUID
     @Binding var text: String
+    @Binding var jumpTo: Int?
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -34,6 +35,15 @@ struct ScriptTextEditor: NSViewRepresentable {
         }
         if changed {
             DispatchQueue.main.async { coordinator.restore(scroll, for: projectID) }
+        }
+        if let offset = jumpTo {
+            DispatchQueue.main.async {
+                guard coordinator.projectID == projectID, jumpTo == offset else { return }
+                let range = NSRange(location: min(max(0, offset), view.string.utf16.count), length: 0)
+                view.setSelectedRange(range)
+                view.scrollRangeToVisible(range)
+                jumpTo = nil
+            }
         }
     }
 

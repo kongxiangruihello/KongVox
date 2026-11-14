@@ -33,6 +33,20 @@ import AVFoundation
         UserDefaults.standard.set(url.path, forKey: "KongVox.sovitsLauncher")
     }
 
+    var ownsRunningEngine: Bool { Self.engineProcess?.isRunning == true }
+
+    func stopService(restart: Bool = false) async {
+        guard !launching, let process = Self.engineProcess, process.isRunning else { return }
+        launching = true
+        process.terminate()
+        for _ in 0..<20 where process.isRunning { try? await Task.sleep(nanoseconds: 200_000_000) }
+        launching = false
+        guard !process.isRunning else { localStatus = "本机进程仍在退出，请稍后再试。"; return }
+        Self.engineProcess = nil
+        localStatus = "已停止由 KongVox 启动的服务。"
+        if restart { await launchService() }
+    }
+
     func launchService() async {
         guard !launching, profile.kind == .gptSoVITS else { return }
         launching = true
@@ -52,9 +66,10 @@ import AVFoundation
                 try process.run()
                 Self.engineProcess = process
             }
+            let started = Date()
             localStatus = "正在载入模型…"
             for _ in 0..<30 {
-                if await localServiceReady() { localStatus = "本机服务已可用。"; return }
+                if await localServiceReady() { localStatus = "本机服务已可用（\(Int(Date().timeIntervalSince(started))) 秒）。"; return }
                 if let running = Self.engineProcess, !running.isRunning {
                     localStatus = "启动脚本已退出（代码 \(running.terminationStatus)）。请在终端运行同一脚本查看详情。"
                     return
@@ -275,6 +290,12 @@ struct ServiceSettings: View {
                     Button("选择启动脚本…") { editor.chooseLauncher() }.disabled(editor.launching)
                     Button("启动") { Task { await editor.launchService() } }.disabled(editor.launching || editor.launchScript.isEmpty)
                 }.task(id: editor.profile.normalizedURL) { await editor.checkLocalService() }
+                if editor.ownsRunningEngine {
+                    HStack {
+                        Button("停止") { Task { await editor.stopService() } }
+                        Button("重启") { Task { await editor.stopService(restart: true) } }
+                    }.disabled(editor.launching || editor.testing)
+                }
                 Text(editor.localStatus).font(.caption)
                 TextField("参考音频绝对路径", text: Binding(get: { editor.profile.referenceAudioPath ?? "" }, set: { editor.profile.referenceAudioPath = $0 }))
                 TextField("参考音频对应的中文文稿", text: Binding(get: { editor.profile.referenceTranscript ?? "" }, set: { editor.profile.referenceTranscript = $0 }))

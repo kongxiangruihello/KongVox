@@ -51,6 +51,39 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertTrue(restored.trashedProjects.isEmpty)
     }
 
+    @MainActor func testDuplicateAndLargeLibraryRoundTrip() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let studio = Studio(root: root)
+        studio.projects = (0..<100).map { project("配音 \($0)") }
+        studio.selected = studio.projects.first?.id
+        let id = try XCTUnwrap(studio.selected)
+        let manuscript = String(repeating: "这一段用于长文生成预览。", count: 2500)
+        studio.edit {
+            $0.longText = manuscript
+            $0.prepareLongDocument()
+            let take = Take(file: "shared.wav", fingerprint: $0.segments[0].fingerprint($0.settings))
+            $0.segments[0].takes = [take]
+            $0.segments[0].selectedTake = take.id
+        }
+        let shared = try XCTUnwrap(studio.duplicateRecording(id, includeAudio: true))
+        let clean = try XCTUnwrap(studio.duplicateRecording(id, includeAudio: false))
+        let reopened = Studio(root: root)
+        XCTAssertEqual(reopened.projects.count, 102)
+        XCTAssertEqual(reopened.projects.first { $0.id == shared }?.segments.first?.current?.file, "shared.wav")
+        XCTAssertTrue(reopened.projects.first { $0.id == clean }?.segments.allSatisfy { $0.takes.isEmpty } == true)
+        let long = try XCTUnwrap(reopened.projects.first { $0.id == id })
+        XCTAssertEqual(long.fullText, manuscript)
+        let impact = GenerationImpact(long, selected: Set(long.segments.map(\.id)), force: false, ready: { _ in false }, recovery: { _ in false })
+        XCTAssertEqual(impact.pending.count, long.segments.count)
+    }
+
+    func testManuscriptDiffWithUnicodeAndDeletedTail() {
+        let changes = ManuscriptChange.compare("👋你好\n旧句\n保留\n删尾", "👋你好\n新句\n保留")
+        XCTAssertEqual(changes.map(\.text), ["旧句", "新句", "删尾"])
+        XCTAssertEqual(changes.map(\.added), [false, true, false])
+        XCTAssertEqual(changes.map(\.offset), [5, 5, 10])
+    }
+
     func testLegacyFileMigratesOnceAndIsKeptAsBackup() throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let legacy = [project("甲"), project("乙"), project("丙")]

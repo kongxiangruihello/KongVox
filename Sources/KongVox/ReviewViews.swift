@@ -11,17 +11,32 @@ struct FinishedReview: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var state = ReviewState()
     var initialSegment: UUID?
+    @State private var onlyBookmarked = false
+    @State private var showExcerpt = false
+    @State private var excerptStart = 0.0
+    @State private var excerptEnd = 15.0
+    @State private var loopExcerpt = false
+    @AppStorage("KongVox.reviewBookmarks") private var bookmarks = ""
+    private var bookmarkIDs: Set<String> { Set(bookmarks.split(separator: ",").map(String.init)) }
+
+    private func toggleBookmark(_ id: UUID) {
+        var ids = bookmarkIDs
+        if ids.remove(id.uuidString) == nil { ids.insert(id.uuidString) }
+        bookmarks = ids.sorted().joined(separator: ",")
+    }
     var body: some View {
         let canPlay = studio.fullAudioReady
         return VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("成品检查").font(.title2.bold()); Spacer()
+                Toggle("仅看书签", isOn: $onlyBookmarked).toggleStyle(.checkbox)
                 Toggle("跟随播放", isOn: $state.follow).toggleStyle(.checkbox)
                 Button("完成") { dismiss() }
             }
             Text("点击文稿从对应片段播放；高亮按片段时间轴跟随，不是逐字对齐。修改原稿前请返回主界面。").font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("播放全文") { studio.playAll() }.disabled(studio.isWorking || !canPlay)
+                Button("区间试听…") { openExcerpt(at: studio.playbackTime) }.disabled(studio.isWorking || !canPlay)
                 Button(studio.playing ? "暂停" : "继续") { studio.togglePause() }.disabled(studio.player == nil || studio.isWorking)
                 Button("停止") { studio.stop() }.disabled(studio.isWorking)
                 Spacer()
@@ -30,17 +45,44 @@ struct FinishedReview: View {
             }
             if studio.playbackDuration > 0 {
                 PlaybackScrubber(clock: studio.clock, label: "成品播放进度").disabled(studio.isWorking)
+                if let p = studio.project, !studio.playbackCues.isEmpty {
+                    ReviewTimeline(project: p, clock: studio.clock, cues: studio.playbackCues, duration: studio.playbackDuration)
+                    HStack {
+                        Menu("跳到章节") {
+                            ForEach(p.chapters) { chapter in
+                                Button(chapter.title) { if let id = chapter.segmentIDs.first { studio.playAll(from: id) } }
+                                if let start = studio.playbackCues.first(where: { $0.id == chapter.segmentIDs.first })?.start {
+                                    Button("设为试听起点：\(chapter.title)") { openExcerpt(at: start) }
+                                }
+                            }
+                        }
+                        Menu("跳到段落") {
+                            ForEach(Array(p.segments.enumerated()), id: \.element.id) { index, segment in
+                                Button("\(index + 1). \(String(segment.text.prefix(34)))") { studio.playAll(from: segment.id) }
+                            }
+                        }
+                        if let id = studio.readingSegment, let segment = p.segments.first(where: { $0.id == id }) {
+                            Text(segment.text).lineLimit(1).font(.caption)
+                        }
+                    }
+                }
             }
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         if let p = studio.project {
-                            ForEach(Array(p.segments.enumerated()), id: \.element.id) { index, segment in
+                            ForEach(Array(p.segments.enumerated()).filter { !onlyBookmarked || bookmarkIDs.contains($0.element.id.uuidString) }, id: \.element.id) { index, segment in
                                 VStack(alignment: .leading, spacing: 10) {
                                     HStack {
                                         Text("片段 \(index + 1)").font(.caption).foregroundStyle(.secondary)
                                         if studio.readingSegment == segment.id { Label("当前播放", systemImage: "speaker.wave.2.fill").font(.caption).foregroundStyle(.indigo) }
                                         Spacer()
+                                        Button { toggleBookmark(segment.id) } label: {
+                                            Image(systemName: bookmarkIDs.contains(segment.id.uuidString) ? "bookmark.fill" : "bookmark")
+                                        }.accessibilityLabel("切换校对书签")
+                                        if let cue = studio.playbackCues.first(where: { $0.id == segment.id }) {
+                                            Button("从此段选区间") { openExcerpt(at: cue.start) }.disabled(studio.isWorking || !canPlay)
+                                        }
                                         Button("修复 / 版本对比") { state.repairID = segment.id; state.showRepair = true }.disabled(studio.isWorking)
                                     }
                                     Button { studio.playAll(from: segment.id) } label: {
@@ -71,11 +113,34 @@ struct FinishedReview: View {
                 Text("全文已修改，请先返回生成范围更新处理片段，再检查最新内容。").font(.caption).foregroundStyle(.orange)
             }
         }.padding(24).frame(width: 880, height: 650)
+        .sheet(isPresented: $showExcerpt) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("成品区间试听").font(.headline)
+                TextField("起点（秒）", value: $excerptStart, format: .number)
+                TextField("终点（秒）", value: $excerptEnd, format: .number)
+                Toggle("循环播放区间", isOn: $loopExcerpt)
+                HStack {
+                    Button("取消") { showExcerpt = false }
+                    Spacer()
+                    Button("播放区间") {
+                        showExcerpt = false
+                        studio.playAll(excerpt: excerptStart...excerptEnd, loop: loopExcerpt)
+                    }.keyboardShortcut(.defaultAction)
+                        .disabled(!excerptStart.isFinite || !excerptEnd.isFinite || excerptStart < 0 || excerptEnd <= excerptStart || studio.isWorking)
+                }
+            }.padding(20).frame(width: 340)
+        }
         .sheet(isPresented: $state.showRepair) {
             if let id = state.repairID { SegmentRepair(segmentID: id).environmentObject(studio) }
         }
         .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil } } message: { Text(studio.error ?? "") }
     }
+    private func openExcerpt(at start: Double) {
+        excerptStart = start
+        excerptEnd = start + 15
+        showExcerpt = true
+    }
+
 }
 final class RepairState: ObservableObject {
     @Published var pronunciation = ""
@@ -91,10 +156,23 @@ struct SegmentRepair: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var state = RepairState()
     @State private var comparisonTake: UUID?
+    @State private var matchLevels = false
+    @State private var rangeStart = 0.0
+    @State private var rangeLength = 10.0
     let segmentID: UUID
     private func compare(_ take: Take) {
         let offset = comparisonTake == nil ? 0 : studio.playbackTime
-        studio.play(studio.audioURL(take), from: offset)
+        let source = studio.audioURL(take)
+        if matchLevels {
+            do {
+                let pcm = try AudioAssembly.prepare(Data(contentsOf: source), trimStart: false, trimEnd: false, normalize: true)
+                let preview = studio.root.appendingPathComponent("comparison-preview.wav")
+                try AudioFiles.writePCM(pcm, to: preview)
+                studio.play(preview, from: offset)
+            } catch { studio.error = error.localizedDescription; return }
+        } else {
+            studio.play(source, from: offset)
+        }
         comparisonTake = take.id
     }
     var segment: Segment? { studio.project?.segments.first { $0.id == segmentID } }
@@ -152,6 +230,24 @@ struct SegmentRepair: View {
                         if studio.player != nil { PlaybackScrubber(clock: studio.clock, label: "A/B 试听进度") }
                     }.disabled(studio.isWorking)
                 }
+                HStack {
+                    Toggle("匹配试听响度", isOn: $matchLevels)
+                    if let take = segment.current {
+                        TextField("起点（秒）", value: $rangeStart, format: .number).frame(width: 65)
+                        Picker("试听长度", selection: $rangeLength) {
+                            ForEach([10.0, 15, 20, 30], id: \.self) { Text("\(Int($0)) 秒").tag($0) }
+                        }
+                        Button("试听范围") {
+                            let url = studio.audioURL(take)
+                            do {
+                                let duration = Double(try AudioFiles.extractPCM(Data(contentsOf: url)).count) / 48000
+                                guard rangeStart >= 0, rangeStart < duration else { throw VoxError(message: "试听起点超出本段时长。") }
+                                comparisonTake = nil
+                                studio.playRange(url, start: rangeStart, end: min(duration, rangeStart + rangeLength), loop: false)
+                            } catch { studio.error = error.localizedDescription }
+                        }
+                    }
+                }.disabled(studio.isWorking)
                 List {
                     ForEach(Array(segment.takes.enumerated()), id: \.element.id) { index, take in
                         VStack(alignment: .leading, spacing: 5) {
@@ -208,4 +304,62 @@ private struct PlaybackScrollObserver: NSViewRepresentable {
 
     func makeNSView(context: Context) -> Observer { Observer() }
     func updateNSView(_ view: Observer, context: Context) { view.onScroll = onScroll }
+}
+
+private struct ReviewTimeline: View {
+    @EnvironmentObject var studio: Studio
+    let project: Project
+    @ObservedObject var clock: PlaybackClock
+    let cues: [PlaybackCue]
+    let duration: Double
+    @State private var hoverTime: Double?
+
+    var body: some View {
+        let chapterStarts = Set(project.chapters.compactMap { $0.segmentIDs.first })
+        let cursor = hoverTime ?? clock.time
+        let current = PlaybackTimeline.current(cursor, cues: cues)
+        VStack(alignment: .leading, spacing: 3) {
+            GeometryReader { geometry in
+                Canvas { context, size in
+                    let middle = size.height / 2
+                    var track = Path()
+                    track.move(to: CGPoint(x: 0, y: middle))
+                    track.addLine(to: CGPoint(x: size.width, y: middle))
+                    context.stroke(track, with: .color(.secondary.opacity(0.3)))
+                    for cue in cues {
+                        let isChapter = chapterStarts.contains(cue.id)
+                        let x = cue.start / duration * size.width
+                        let height: CGFloat = isChapter ? 14 : 6
+                        var tick = Path()
+                        tick.move(to: CGPoint(x: x, y: middle - height / 2))
+                        tick.addLine(to: CGPoint(x: x, y: middle + height / 2))
+                        context.stroke(tick, with: .color(isChapter ? .indigo : .secondary.opacity(0.5)), lineWidth: isChapter ? 2 : 1)
+                    }
+                    let x = min(size.width, max(0, cursor / duration * size.width))
+                    context.fill(Path(ellipseIn: CGRect(x: x - 3, y: middle - 3, width: 6, height: 6)), with: .color(.accentColor))
+                }
+                .contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let point): hoverTime = time(at: point.x, width: geometry.size.width)
+                    case .ended: hoverTime = nil
+                    }
+                }
+                .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
+                    let seconds = time(at: drag.location.x, width: geometry.size.width)
+                    hoverTime = seconds
+                    studio.seek(seconds)
+                }.onEnded { _ in hoverTime = nil })
+                .accessibilityHidden(true)
+            }.frame(height: 18)
+            if let current, let segment = project.segments.first(where: { $0.id == current }) {
+                Text(Studio.timeLabel(cursor) + " · " + segment.text)
+                    .lineLimit(1).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func time(at x: CGFloat, width: CGFloat) -> Double {
+        min(1, max(0, x / max(1, width))) * duration
+    }
 }

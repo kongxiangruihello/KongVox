@@ -164,7 +164,7 @@ extension Studio {
     func estimatedQueueCharacters() -> Int { queue.compactMap { entry in projects.first { $0.id == entry.projectID } }.reduce(0) { $0 + queueCharacters($1) } }
     func estimatedQueueCost() -> Double { Double(estimatedQueueCharacters()) / 10000.0 * batchBudget.yuanPerTenThousand }
 
-    func exportShortVideoPackage(to preferred: URL? = nil) {
+    func exportShortVideoPackage(to preferred: URL? = nil, naming: String? = nil) {
         guard !isWorking, let p = project else { return }
         do {
             let urls = try currentURLs()
@@ -175,7 +175,7 @@ extension Studio {
                 let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.prompt = "选择文件夹"
                 configureDeliveryPanel(panel)
                 guard panel.runModal() == .OK, let directory = panel.url else { return }
-                destination = directory.appendingPathComponent(deliveryName(p, format: "short-video"))
+                destination = directory.appendingPathComponent(deliveryName(p, format: "short-video", naming: naming))
                 guard !FileManager.default.fileExists(atPath: destination.path) else { throw VoxError(message: "目标文件夹已存在，请换一个位置。") }
             }
             rememberDeliveryFolder(destination.deletingLastPathComponent())

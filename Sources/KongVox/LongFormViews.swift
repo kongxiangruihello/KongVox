@@ -3,6 +3,7 @@ import SwiftUI
 final class GenerationReviewState: ObservableObject {
     @Published var force = false
     @Published var selected = Set<UUID>()
+    @Published var onlyChanges = false
 }
 struct GenerationReview: View {
     @EnvironmentObject var studio: Studio
@@ -26,9 +27,10 @@ struct GenerationReview: View {
                     Button("全选范围内") { state.selected = Set(p.segments.filter { scope == nil || scope!.contains($0.id) }.map(\.id)) }
                     Button("只选待更新") { state.force = false; state.selected = Set(p.segments.filter { (scope == nil || scope!.contains($0.id)) && !studio.ready($0, in: p) }.map(\.id)) }
                     Button("全不选") { state.selected = [] }
+                    Toggle("只看需要处理的段落", isOn: $state.onlyChanges)
                 }
                 List {
-                    ForEach(Array(p.segments.enumerated()), id: \.element.id) { index, segment in
+                    ForEach(Array(p.segments.enumerated()).filter { !state.onlyChanges || impact.pending.contains($0.element.id) }, id: \.element.id) { index, segment in
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(alignment: .top) {
                                 Toggle("选择片段 \(index + 1)", isOn: Binding(get: { state.selected.contains(segment.id) }, set: { value in
@@ -38,6 +40,13 @@ struct GenerationReview: View {
                                 Text(segment.text).lineLimit(3)
                                 Spacer()
                                 Text(label(segment, p)).font(.caption).foregroundStyle(impact.pending.contains(segment.id) ? .orange : .secondary)
+                            }
+                            if impact.pending.contains(segment.id), let old = segment.current?.spokenText,
+                               old != p.settings.reading(segment.spokenText) {
+                                DisclosureGroup("与采用版本比较") {
+                                    Text("原读法：\(old)").textSelection(.enabled)
+                                    Text("新读法：\(p.settings.reading(segment.spokenText))").textSelection(.enabled)
+                                }.font(.caption)
                             }
                             DisclosureGroup("提交读法 · \(p.settings.reading(segment.spokenText).count) 字") {
                                 Text(p.settings.reading(segment.spokenText)).font(.caption).textSelection(.enabled)
@@ -169,6 +178,13 @@ struct LongFormWorkbench: View {
                     let done = p.segments.filter { studio.ready($0, in: p) }.count
                     ProgressView(value: Double(done), total: Double(max(1, p.segments.count)))
                     Text("\(done) / \(p.segments.count) 片段就绪").font(.caption)
+                    DisclosureGroup("逐段结果") {
+                        ForEach(Array(p.segments.enumerated()), id: \.element.id) { index, segment in
+                            LabeledContent("第 \(index + 1) 段", value: studio.failedSegments[p.id] == segment.id ? "失败待重试" :
+                                studio.ready(segment, in: p) ? "已保存" :
+                                DownloadReceipt.exists(studio.recoveryFile(segment, project: p)) ? "待恢复" : "待生成")
+                        }
+                    }.font(.caption)
                     if let message = p.taskMessage { Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(4) }
                     HStack {
                         if p.id == studio.activeProject {
@@ -197,7 +213,7 @@ struct DictionaryEditor: View {
     @StateObject private var state = DictionaryState()
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Picker("范围", selection: $state.global) { Text("当前项目").tag(false); Text("所有项目").tag(true) }.pickerStyle(.segmented)
+            Picker("范围", selection: $state.global) { Text("当前配音").tag(false); Text("全局").tag(true) }.pickerStyle(.segmented)
                 .onChange(of: state.global) { _ in load() }
             if studio.project?.usesDictionarySnapshot == true { Text("本项目沿用备份时的全局词典快照；当前全局词典的修改不会影响它。").font(.caption).foregroundStyle(.secondary) }
             Text("填写原词与希望朗读的替代文字。项目词条优先，同位置优先匹配长词，不连锁替换；字幕保留原文。保存后仅影响含这些词的音频。切换范围会放弃未保存编辑。").font(.caption).foregroundStyle(.secondary)

@@ -22,6 +22,11 @@ struct DeliveryView: View {
     @AppStorage("KongVox.lastDeliveryFormat") private var lastFormat = "zip"
     @State private var repeatTarget: Studio.LastDelivery?
     @State private var confirmRepeat = false
+    @State private var issuesOnly = false
+    @AppStorage("KongVox.deliveryPresetFormat") private var presetFormat = ""
+    @AppStorage("KongVox.deliveryPresetName") private var presetName = "{title}"
+    @State private var filenameRule = "{title}"
+    @State private var showPreset = false
     var initialFormat = "zip"
     var current: Bool { studio.project?.deliveryRevision == state.revision }
     var body: some View {
@@ -46,8 +51,9 @@ struct DeliveryView: View {
                 SpeechCheckBar()
                 if let message = report.renderError { Text(message).foregroundStyle(.red).font(.caption) }
                 if let message = report.subtitleError { Text(message).foregroundStyle(.red).font(.caption) }
+                Toggle("只看接缝与音频异常", isOn: $issuesOnly).toggleStyle(.checkbox)
                 List {
-                    ForEach(Array(p.segments.enumerated()), id: \.element.id) { index, segment in
+                    ForEach(Array(p.segments.enumerated()).filter { entry in !issuesOnly || report.findings.contains(where: { finding in finding.segmentID == entry.element.id }) }, id: \.element.id) { index, segment in
                         VStack(alignment: .leading, spacing: 5) {
                             HStack {
                                 Text("\(index + 1). \(segment.text)").lineLimit(2)
@@ -72,7 +78,7 @@ struct DeliveryView: View {
                     }
                 }
                 LabeledContent("导出预览") {
-                    Text("\(studio.deliveryName(p, format: state.format)) · \(report.duration.map { Studio.timeLabel($0) } ?? "时长待就绪") · \(p.chapters.count) 章 · \(subtitleSummary)")
+                    Text("\(studio.deliveryName(p, format: state.format, naming: filenameRule)) · \(report.duration.map { Studio.timeLabel($0) } ?? "时长待就绪") · \(p.chapters.count) 章 · \(subtitleSummary)")
                         .font(.caption).textSelection(.enabled)
                 }
                 if let previous = studio.lastDelivery(for: p.id) {
@@ -88,6 +94,17 @@ struct DeliveryView: View {
                     }
                 }
                 HStack {
+                    Button("导出预设…") { showPreset = true }
+                    if !presetFormat.isEmpty {
+                        Button("使用常用预设") {
+                            if presetFormat == "mp3" && Studio.ffmpeg == nil { return }
+                            state.format = presetFormat
+                            filenameRule = presetName
+                        }
+                    }
+                    Text(exportContents).font(.caption).foregroundStyle(.secondary)
+                }
+                HStack {
                     Picker("交付格式", selection: $state.format) {
                         Text("音频 + 字幕 ZIP").tag("zip"); Text("SRT 字幕").tag("srt")
                         Text("WAV").tag("wav"); Text("M4A").tag("m4a")
@@ -98,10 +115,10 @@ struct DeliveryView: View {
                     Spacer()
                     Button("确认并导出…") {
                         lastFormat = state.format
-                        if state.format == "zip" { studio.exportBundle() }
-                        else if state.format == "srt" { studio.exportSubtitles() }
-                        else if state.format == "short-video" { studio.exportShortVideoPackage() }
-                        else { studio.export(format: state.format) }
+                        if state.format == "zip" { studio.exportBundle(naming: filenameRule) }
+                        else if state.format == "srt" { studio.exportSubtitles(naming: filenameRule) }
+                        else if state.format == "short-video" { studio.exportShortVideoPackage(naming: filenameRule) }
+                        else { studio.export(format: state.format, naming: filenameRule) }
                     }.buttonStyle(.borderedProminent)
                         .disabled(!current || !state.checked || !report.audioReady || studio.isWorking || ((state.format == "zip" || state.format == "srt") && report.subtitleError != nil))
                 }
@@ -112,6 +129,18 @@ struct DeliveryView: View {
         .sheet(isPresented: $state.showRepair) { if let id = state.repairID { SegmentRepair(segmentID: id).environmentObject(studio) } }
         .sheet(isPresented: $state.showCaptions) { CaptionEditor().environmentObject(studio) }
         .sheet(isPresented: $state.showGenerate) { GenerationReview().environmentObject(studio) }
+        .sheet(isPresented: $showPreset) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("常用导出预设").font(.headline)
+                TextField("文件名规则", text: $filenameRule)
+                Text("用 {title} 代表配音标题。当前格式：\(state.format)。").font(.caption)
+                Button("存为常用预设") {
+                    presetFormat = state.format
+                    presetName = filenameRule
+                    showPreset = false
+                }
+            }.padding(20).frame(width: 420)
+        }
         .confirmationDialog("覆盖上次导出的文件？", isPresented: $confirmRepeat) {
             Button("覆盖并导出", role: .destructive) {
                 if let repeatTarget { studio.repeatDelivery(repeatTarget) }
@@ -121,6 +150,13 @@ struct DeliveryView: View {
             Button("清除并改用自动字幕", role: .destructive) { studio.clearCaptionEdits(); Task { await refresh() } }
         } message: { Text("音频和文稿不受影响。清除后无法撤销，除非恢复之前保存的项目版本。") }
         .alert("KongVox", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) { Button("知道了") { studio.error = nil } } message: { Text(studio.error ?? "") }
+    }
+    private var exportContents: String {
+        switch state.format {
+        case "zip": return "包内：配音.wav、配音.srt"
+        case "short-video": return "包内：旁白.wav、字幕.srt、字幕.ass、项目.json、标题页.txt、结尾页.txt、交付清单.txt"
+        default: return "单个 \(state.format.uppercased()) 文件"
+        }
     }
     private var subtitleSummary: String {
         switch state.format {

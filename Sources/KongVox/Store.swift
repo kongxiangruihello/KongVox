@@ -15,6 +15,7 @@ import UniformTypeIdentifiers
     @Published var pauseRequested = false
     @Published var activeProject: UUID?
     @Published var catalog = ServiceCatalog()
+    @Published var batchHistory: [BatchRun] = []
     @Published var failedSegments: [UUID: UUID] = [:]
     @Published var trashedProjects: [Project] = []
     @Published var projects: [Project] = [] { didSet { usageCache = nil } }
@@ -132,6 +133,7 @@ import UniformTypeIdentifiers
         migrateVersionsOutOfProjects()
         selected = projects.first?.id
         loadTrash()
+        loadBatchHistory()
     }
     // MARK: Version snapshots (stored under Versions/, not in projects.json)
     func versionsFile(_ id: UUID) -> URL { root.appendingPathComponent("Versions").appendingPathComponent(id.uuidString + ".json") }
@@ -238,9 +240,25 @@ import UniformTypeIdentifiers
     }
     /// Writes a pending debounced edit immediately (called on quit and before leaving the editor).
     func flushPendingSave() { if pendingSave != nil { save() } }
+    private var dailySnapshots: [UUID: Date] = [:]
+    private func snapshotBeforeDailyEdit(_ project: Project) {
+        guard storageAvailable, !project.fullText.isEmpty, dailySnapshots[project.id].map({ !Calendar.current.isDateInToday($0) }) ?? true else { return }
+        do {
+            let history = try loadVersions(project.id)
+            if !history.contains(where: { $0.label == "每日备份" && Calendar.current.isDateInToday($0.date) }) {
+                var snapshot = project
+                snapshot.versions = nil
+                let version = ProjectVersion(label: "每日备份", payload: try JSONEncoder().encode(snapshot))
+                try writeVersions(Array((history + [version]).suffix(30)), for: project.id)
+            }
+            dailySnapshots[project.id] = Date()
+        } catch { self.error = "自动备份失败：\(error.localizedDescription)" }
+    }
+
     private func applyEdit(_ change: (inout Project) -> Void) -> Bool {
         guard !isWorking, let index = projects.firstIndex(where: { $0.id == selected }) else { return false }
         stop()
+        snapshotBeforeDailyEdit(projects[index])
         change(&projects[index]); preflightMessage = "配置或文稿已改变，可重新检查。"; findings = []; qualitySummary = "内容已改变，请重新检查"
         clearSpeechFindings("内容已改变，请重新核对")
         return true
@@ -271,6 +289,27 @@ import UniformTypeIdentifiers
         guard save() else { projects.removeAll { $0.id == project.id }; return nil }
         selected = project.id
         return project.id
+    }
+    @discardableResult func duplicateRecording(_ id: UUID, includeAudio: Bool) -> UUID? {
+        guard !isWorking, storageAvailable, var copy = projects.first(where: { $0.id == id }) else { return nil }
+        copy.id = UUID()
+        copy.title += " 副本"
+        copy.versions = nil
+        copy.taskState = nil
+        copy.taskMessage = nil
+        if !includeAudio {
+            copy.archivedSegments = nil
+            copy.captionEdits = nil
+            for index in copy.segments.indices {
+                copy.segments[index].takes = []
+                copy.segments[index].selectedTake = nil
+                copy.segments[index].contextFingerprint = nil
+            }
+        }
+        projects.insert(copy, at: 0)
+        guard save() else { projects.removeAll { $0.id == copy.id }; return nil }
+        selected = copy.id
+        return copy.id
     }
     func importDraft() {
         edit { p in
@@ -423,7 +462,16 @@ import UniformTypeIdentifiers
                     if FileManager.default.fileExists(atPath: cache.path) {
                         pcm = try Data(contentsOf: cache)
                     } else {
-                        pcm = try await client.generate(text: snapshot.settings.reading(segment.spokenText), settings: segment.effectiveSettings(snapshot.settings), key: key, recoveryFile: recovery, context: snapshot.context(for: segment.id))
+                        let text = snapshot.settings.reading(segment.spokenText)
+                        let settings = segment.effectiveSettings(snapshot.settings)
+                        let context = snapshot.context(for: segment.id)
+                        do {
+                            pcm = try await client.generate(text: text, settings: settings, key: key, recoveryFile: recovery, context: context)
+                        } catch let failure as ServiceFailure where resume && failure.isTransientDownloadFailure {
+                            status = "下载暂时中断，稍后重试已合成音频…"
+                            try await Task.sleep(nanoseconds: 1_000_000_000)
+                            pcm = try await client.generate(text: text, settings: settings, key: key, recoveryFile: recovery, context: context)
+                        }
                         try FileManager.default.createDirectory(at: cache.deletingLastPathComponent(), withIntermediateDirectories: true)
                         try pcm.write(to: cache, options: .atomic)
                     }
@@ -461,6 +509,9 @@ import UniformTypeIdentifiers
                 }
             }
             status = "配音已完成，可以试听或导出。"
+            if fullAudioReady, let index = projects.firstIndex(where: { $0.id == snapshot.id }) {
+                projects[index].lastGeneratedManuscript = snapshot.fullText
+            }
             setTaskState(snapshot.id, fullAudioReady ? "已完成" : "待继续", fullAudioReady ? "全部音频已保存" : "部分内容已保存，可继续生成剩余内容")
             if only == nil, fullAudioReady, notificationsEnabled { CompletionNotice.shared.send() }
             if audition, let take = auditionTake {
@@ -576,6 +627,7 @@ import UniformTypeIdentifiers
         if let range = playbackRange, playing, (!player.isPlaying || player.currentTime >= range.upperBound) {
             if repeatRange { player.currentTime = range.lowerBound; playing = player.play(); playbackTime = range.lowerBound }
             else { player.pause(); player.currentTime = range.upperBound; playing = false; playbackTime = range.upperBound }
+            readingSegment = PlaybackTimeline.current(playbackTime, cues: playbackCues)
             return
         }
         if player.isPlaying { playbackTime = player.currentTime }
@@ -586,7 +638,8 @@ import UniformTypeIdentifiers
     }
     func seek(_ seconds: Double) {
         guard seconds.isFinite, let player else { return }
-        player.currentTime = max(0, min(player.duration, seconds)); playbackTime = player.currentTime
+        let bounds = playbackRange ?? 0...player.duration
+        player.currentTime = max(bounds.lowerBound, min(bounds.upperBound, seconds)); playbackTime = player.currentTime
         readingSegment = PlaybackTimeline.current(playbackTime, cues: playbackCues)
     }
     func skip(_ seconds: Double) { seek(playbackTime + seconds) }
@@ -606,12 +659,22 @@ import UniformTypeIdentifiers
         UserDefaults.standard.set(seconds, forKey: "KongVox.playback." + id.uuidString)
     }
 
-    func playAll(from segmentID: UUID? = nil, resume: Bool = false) {
+    func playAll(from segmentID: UUID? = nil, resume: Bool = false, excerpt: ClosedRange<Double>? = nil, loop: Bool = false) {
         guard !isWorking else { return }
         do {
             let urls = try currentURLs(); let snapshot = project!; let gaps = snapshot.gaps; let normalize = snapshot.levelsEnabled
-            if playbackProject == snapshot.id, let segmentID, let cue = playbackCues.first(where: { $0.id == segmentID }), player != nil {
-                seek(cue.start); if !playing { togglePause() }; return
+            if playbackProject == snapshot.id, player != nil {
+                if let excerpt {
+                    playExcerpt(excerpt, loop: loop)
+                    return
+                }
+                if let segmentID, let cue = playbackCues.first(where: { $0.id == segmentID }) {
+                    playbackRange = nil
+                    repeatRange = false
+                    seek(cue.start)
+                    if !playing { togglePause() }
+                    return
+                }
             }
             stop(); busy = true; status = "正在准备试听…"
             task = Task {
@@ -622,12 +685,30 @@ import UniformTypeIdentifiers
                     let cues = try PlaybackTimeline.make(ids: snapshot.segments.map(\.id), frames: frames, gaps: gaps)
                     let saved = resume ? UserDefaults.standard.double(forKey: "KongVox.playback." + snapshot.id.uuidString) : 0
                     let start = segmentID.flatMap { id in cues.first(where: { $0.id == id })?.start } ?? saved
-                    play(preview, cues: cues, projectID: snapshot.id, from: start)
-                    status = "正在试听完整配音。"
+                    if let excerpt, let duration = cues.last?.end,
+                       PlaybackTimeline.excerpt(excerpt, duration: duration) == nil {
+                        throw VoxError(message: "试听范围超出成品时长。")
+                    }
+                    play(preview, cues: cues, projectID: snapshot.id, from: excerpt?.lowerBound ?? start)
+                    if let excerpt { playExcerpt(excerpt, loop: loop) }
+                    else { status = "正在试听完整配音。" }
                 } catch { self.error = error.localizedDescription }
             }
         } catch { self.error = error.localizedDescription }
     }
+    private func playExcerpt(_ requested: ClosedRange<Double>, loop: Bool) {
+        guard let player else { return }
+        guard let range = PlaybackTimeline.excerpt(requested, duration: player.duration) else {
+            error = "试听范围超出成品时长。"
+            return
+        }
+        playbackRange = range
+        repeatRange = loop
+        seek(range.lowerBound)
+        if !playing { togglePause() }
+        status = "试听 \(Self.timeLabel(range.lowerBound))–\(Self.timeLabel(range.upperBound))" + (loop ? " · 循环" : "")
+    }
+
     static var ffmpeg: URL? {
         ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"].first { FileManager.default.isExecutableFile(atPath: $0) }.map { URL(fileURLWithPath: $0) }
     }
@@ -658,11 +739,12 @@ import UniformTypeIdentifiers
         guard panel.runModal() == .OK else { return nil }
         return panel.url
     }
-    func deliveryName(_ project: Project, format: String) -> String {
+    func deliveryName(_ project: Project, format: String, naming: String? = nil) -> String {
+        let title = naming.map { BatchExport.safeName($0.replacingOccurrences(of: "{title}", with: project.title)) } ?? project.title
         switch format {
-        case "zip": return project.title + "-音频与字幕.zip"
-        case "short-video": return "KongVox-短视频-" + BatchExport.safeName(String(project.title.prefix(30)))
-        default: return project.title + "." + format
+        case "zip": return title + "-音频与字幕.zip"
+        case "short-video": return "KongVox-短视频-" + BatchExport.safeName(String(title.prefix(30)))
+        default: return title + "." + format
         }
     }
     func configureDeliveryPanel(_ panel: NSSavePanel) {
@@ -674,13 +756,13 @@ import UniformTypeIdentifiers
     func rememberDeliveryFolder(_ directory: URL) {
         UserDefaults.standard.set(directory.path, forKey: "KongVox.lastExportFolder")
     }
-    func exportSubtitles(to preferred: URL? = nil) {
+    func exportSubtitles(to preferred: URL? = nil, naming: String? = nil) {
         guard !isWorking, let p = project else { return }
         do {
             let urls = try currentURLs()
             let panel = NSSavePanel()
             panel.allowedContentTypes = [UTType(filenameExtension: "srt") ?? .plainText]
-            panel.nameFieldStringValue = deliveryName(p, format: "srt")
+            panel.nameFieldStringValue = deliveryName(p, format: "srt", naming: naming)
             guard let destination = deliveryDestination(panel, preferred: preferred) else { return }
             rememberDeliveryFolder(destination.deletingLastPathComponent())
             let folder = root
@@ -707,12 +789,12 @@ import UniformTypeIdentifiers
             }
         } catch { self.error = error.localizedDescription }
     }
-    func exportBundle(to preferred: URL? = nil) {
+    func exportBundle(to preferred: URL? = nil, naming: String? = nil) {
         guard !isWorking, let p = project else { return }
         do {
             let urls = try currentURLs()
             let panel = NSSavePanel(); panel.allowedContentTypes = [.zip]
-            panel.nameFieldStringValue = deliveryName(p, format: "zip")
+            panel.nameFieldStringValue = deliveryName(p, format: "zip", naming: naming)
             guard let destination = deliveryDestination(panel, preferred: preferred) else { return }
             rememberDeliveryFolder(destination.deletingLastPathComponent())
             let folder = root
@@ -728,13 +810,13 @@ import UniformTypeIdentifiers
             }
         } catch { self.error = error.localizedDescription }
     }
-    func export(format: String, to preferred: URL? = nil) {
+    func export(format: String, to preferred: URL? = nil, naming: String? = nil) {
         guard !isWorking, let project else { return }
         do {
             let urls = try currentURLs()
             let panel = NSSavePanel()
             panel.allowedContentTypes = [format == "wav" ? .wav : format == "mp3" ? .mp3 : .mpeg4Audio]
-            panel.nameFieldStringValue = deliveryName(project, format: format)
+            panel.nameFieldStringValue = deliveryName(project, format: format, naming: naming)
             guard let destination = deliveryDestination(panel, preferred: preferred) else { return }
             rememberDeliveryFolder(destination.deletingLastPathComponent())
             let gaps = project.gaps; let normalize = project.levelsEnabled; let seam = project.resolvedSeam

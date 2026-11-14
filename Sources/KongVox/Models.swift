@@ -75,6 +75,7 @@ struct Project: Codable, Identifiable {
     var longMode: Bool?
     var longText: String?
     var preparedLongText: String?
+    var lastGeneratedManuscript: String?
     var archivedSegments: [Segment]?
     var usesDictionarySnapshot: Bool?
     var taskState: String?

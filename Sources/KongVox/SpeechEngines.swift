@@ -172,10 +172,19 @@ struct VolcengineEngine: HTTPSpeechEngine {
     }
     func audio(_ data: Data, http: HTTPURLResponse, job: SpeechJob, recoveryFile: URL?, client: SpeechClient) async throws -> Data {
         try Task.checkCancellation()
-        if !(200..<300).contains(http.statusCode) {
-            throw VolcengineAudio.failure(body: data, httpStatus: http.statusCode, resourceID: job.profile.model, speaker: job.settings.voice)
+        do {
+            if !(200..<300).contains(http.statusCode) {
+                throw VolcengineAudio.failure(body: data, httpStatus: http.statusCode, resourceID: job.profile.model, speaker: job.settings.voice)
+            }
+            return try VolcengineAudio.decode(data, resourceID: job.profile.model, speaker: job.settings.voice)
+        } catch var failure as ServiceFailure {
+            let sanitize: (String) -> String = { String($0.filter { $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }.prefix(128)) }
+            let requestID = sanitize(http.value(forHTTPHeaderField: "X-Tt-Logid") ?? "")
+            failure.status = http.statusCode
+            failure.requestDetails = "资源：\(sanitize(job.profile.model)) · 音色：\(sanitize(job.settings.voice))"
+                + (requestID.isEmpty ? "" : "\n服务端请求编号：\(requestID)")
+            throw failure
         }
-        return try VolcengineAudio.decode(data, resourceID: job.profile.model, speaker: job.settings.voice)
     }
 }
 

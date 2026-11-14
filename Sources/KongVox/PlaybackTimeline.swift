@@ -12,6 +12,13 @@ struct PlaybackCue: Identifiable, Equatable {
     var end: Double
 }
 enum PlaybackTimeline {
+    static func excerpt(_ requested: ClosedRange<Double>, duration: Double) -> ClosedRange<Double>? {
+        guard requested.lowerBound.isFinite, requested.upperBound.isFinite, duration.isFinite,
+              requested.lowerBound >= 0, requested.lowerBound < duration,
+              requested.upperBound > requested.lowerBound else { return nil }
+        return requested.lowerBound...min(requested.upperBound, duration)
+    }
+
     static func make(ids: [UUID], frames: [Int64], gaps: [Double]) throws -> [PlaybackCue] {
         guard ids.count == frames.count, ids.count == gaps.count,
               frames.allSatisfy({ $0 > 0 }), gaps.allSatisfy({ $0.isFinite && (0...3).contains($0) }) else {

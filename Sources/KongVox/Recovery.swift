@@ -10,8 +10,12 @@ struct ServiceFailure: LocalizedError {
     let category: String
     let hint: String
     var status: Int? = nil
+    var requestDetails: String? = nil
+    var isTransientDownloadFailure: Bool {
+        stage == "音频下载失败" && (category == "network" || [429, 500, 502, 503, 504].contains(status ?? 0))
+    }
     var errorDescription: String? { "\(stage)：\(hint)" }
-    var report: String { "KongVox \(AppInfo.version)\n阶段：\(stage)\n分类：\(category)\nHTTP：\(status.map(String.init) ?? "无")\n建议：\(hint)" }
+    var report: String { "KongVox \(AppInfo.version)\n阶段：\(stage)\n分类：\(category)\nHTTP：\(status.map(String.init) ?? "无")\n建议：\(hint)" + (requestDetails.map { "\n" + $0 } ?? "") }
     static func http(_ status: Int, body: Data, download: Bool = false) -> ServiceFailure {
         if download {
             return Self(stage: "音频下载失败", category: "download", hint: status == 403 || status == 404 ? "下载链接可能已过期。可先重试；仍失败时选择「放弃下载缓存」，再重新生成（可能计费）。" : "生成结果已保留，请检查网络后继续下载。", status: status)

@@ -113,3 +113,24 @@ struct ServiceCatalog: Codable {
     var profiles: [ServiceProfile] = [.openAI, .gemini, .cosyVoice, .qwenTTS, .volcengine, .localQwen]
     var defaultID = "gemini"
 }
+
+extension ServiceProfile {
+    func voiceCapabilities(voice: String, direction: String) -> (speed: String, context: String, expression: String) {
+        let yes = "支持", no = "不应用", prompt = "提示词"
+        switch kind {
+        case .openAI:
+            let legacy = model == "tts-1" || model == "tts-1-hd"
+            return (yes, legacy ? no : prompt, legacy ? no : prompt)
+        case .gemini: return (prompt, prompt, prompt)
+        case .volcengine, .gptSoVITS: return (yes, no, no)
+        case .localQwen: return (prompt, no, prompt)
+        case .qwenTTS:
+            let instruct = model.hasPrefix("qwen3-tts-instruct-flash")
+            return instruct ? (prompt, prompt, prompt) : (no, no, no)
+        case .cosyVoice:
+            let instruct = model == "cosyvoice-v3-flash" || model.hasPrefix("cosyvoice-v3.5-")
+            let hasInstruction = !direction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || ["longanyang", "longanhuan"].contains(voice)
+            return (yes, instruct && hasInstruction ? prompt : no, instruct ? prompt : no)
+        }
+    }
+}

@@ -19,6 +19,18 @@ final class Version07Tests: XCTestCase {
         }
         return p
     }
+    func testExcerptClampsToAudioAndKeepsCrossSegmentBoundaries() throws {
+        let ids = [UUID(), UUID(), UUID()]
+        let cues = try PlaybackTimeline.make(ids: ids, frames: [24_000, 48_000, 24_000], gaps: [0.25, 0.5, 0])
+        let duration = cues[2].end
+        let excerpt = try XCTUnwrap(PlaybackTimeline.excerpt(0.5...10, duration: duration))
+        XCTAssertEqual(excerpt, 0.5...duration)
+        XCTAssertEqual(PlaybackTimeline.current(excerpt.lowerBound, cues: cues), ids[0])
+        XCTAssertEqual(PlaybackTimeline.current(cues[2].start, cues: cues), ids[2])
+        XCTAssertNil(PlaybackTimeline.excerpt(5...7, duration: duration))
+        XCTAssertNil(PlaybackTimeline.excerpt(1...1, duration: duration))
+    }
+
     func testTimelineFromRenderedFrames() throws {
         let root = try Version03Tests().temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let p = try fixture(root), gaps = [0.35, 0.0]
