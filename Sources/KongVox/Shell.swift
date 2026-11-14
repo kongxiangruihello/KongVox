@@ -53,9 +53,33 @@ struct StudioView: View {
     @AppStorage("KongVox.lastRecording") private var lastRecording = ""
     @AppStorage("KongVox.lastStep") private var lastStep = 0
     @State private var restoredWorkspace = false
+    @AppStorage("KongVox.sidebarWidth") private var savedSidebarWidth = 240.0
+    @GestureState private var sidebarDrag: CGFloat = 0
+
+    private func sidebarWidth(_ width: CGFloat) -> CGFloat {
+        min(420, max(200, width))
+    }
+
+    private var sidebarResizeHandle: some View {
+        Rectangle()
+            .fill(.clear)
+            .contentShape(Rectangle())
+            .frame(width: 10)
+            .onHover { hovering in
+                if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .updating($sidebarDrag) { value, offset, _ in offset = value.translation.width }
+                    .onEnded { value in savedSidebarWidth = sidebarWidth(savedSidebarWidth + value.translation.width) }
+            )
+            .accessibilityHidden(true)
+    }
     var body: some View {
         NavigationSplitView {
-            ProjectSidebar(state: state).navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 320)
+            ProjectSidebar(state: state)
+                .overlay(alignment: .trailing) { sidebarResizeHandle }
+                .navigationSplitViewColumnWidth(sidebarWidth(savedSidebarWidth + sidebarDrag))
         } detail: {
             Group {
                 if let p = studio.project { ProjectWorkspace(state: state, project: p) }
