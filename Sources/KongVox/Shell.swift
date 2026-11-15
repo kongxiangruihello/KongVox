@@ -594,7 +594,7 @@ struct ProjectSidebar: View {
                             Button("删除配音…", role: .destructive) { state.deleteID = project.id }
                         }
                 }
-            }.padding(.leading, grouped ? 28 : 0).tag(project.id).id(project.id)
+            }.padding(.leading, grouped ? 28 : 0).help(path(for: project.id) + " / " + project.title).tag(project.id).id(project.id)
         }
     }
 
@@ -1376,7 +1376,7 @@ struct ReviewRow: View {
         Button {
             if studio.fullAudioReady { studio.playAll(from: segment.id) }
             else if let take = segment.current {
-                studio.play(studio.audioURL(take), label: "第 \(index + 1) 段 · 已采用版本")
+                studio.play(studio.audioURL(take), label: "第 \(index + 1) 段 · " + (ready && !project.needsLongPreparation ? "已采用版本" : "旧稿音频"))
             }
         } label: {
             HStack(alignment: .top, spacing: 14) {
@@ -1395,6 +1395,11 @@ struct ReviewRow: View {
         }
         .buttonStyle(.plain)
         .disabled(studio.isWorking || !(segment.current.map { FileManager.default.fileExists(atPath: studio.audioURL($0).path) } ?? false))
+        if let take = segment.current, !ready || (project.isLongMode && project.needsLongPreparation) {
+            DisclosureGroup("查看旧稿音频的朗读内容") {
+                Text(take.spokenText ?? "此历史版本未保存朗读文字。").textSelection(.enabled)
+            }.font(.caption)
+        }
         DisclosureGroup("校对备注") {
             TextField("填写备注", text: Binding(get: { project.reviewNotes?[segment.id] ?? "" }, set: { note in
                 studio.editLive { p in
@@ -1406,9 +1411,11 @@ struct ReviewRow: View {
         }.font(.caption).disabled(studio.isWorking)
         if studio.failedSegments[project.id] == segment.id {
             let receipt = studio.recoveryFile(segment, project: project)
+            let local = FileManager.default.fileExists(atPath: DownloadReceipt.generatedPCM(receipt).path) ||
+                FileManager.default.fileExists(atPath: DownloadReceipt.audioFile(receipt).path)
             let recover = DownloadReceipt.exists(receipt)
             Text(project.taskMessage ?? "本段生成失败。").font(.caption).foregroundStyle(.orange)
-            Button(recover ? "继续恢复音频" : "重新合成…") {
+            Button(recover ? (local ? "从本地音频恢复" : "继续下载") : "重新合成…") {
                 if recover { studio.generate(only: segment.id) } else { confirmRetry = true }
             }.disabled(studio.isWorking)
         }

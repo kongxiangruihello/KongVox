@@ -72,6 +72,11 @@ final class LongDocumentTests: XCTestCase {
         XCTAssertEqual(try AudioFiles.extractPCM(Data(contentsOf: output)).count, urls.count * 4800)
         resumed.rememberDelivery(output, format: "wav", projectID: resumed.selected!)
         XCTAssertEqual(resumed.lastDelivery(for: resumed.selected!)?.signature, resumed.project?.exportSignature)
+        resumed.edit {
+            $0.reviewNotes = [ $0.segments[0].id: "只改备注" ]
+            $0.completedReview = [ $0.segments[0].id ]
+        }
+        XCTAssertEqual(resumed.lastDelivery(for: resumed.selected!)?.signature, resumed.project?.exportSignature)
         resumed.edit { $0.longText = article + "修改。" }
         XCTAssertNotEqual(resumed.lastDelivery(for: resumed.selected!)?.signature, resumed.project?.exportSignature)
         XCTAssertFalse(resumed.fullAudioReady)

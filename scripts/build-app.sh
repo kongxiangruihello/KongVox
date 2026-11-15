@@ -43,6 +43,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>CFBundleExecutable</key><string>KongVox</string>
 <key>CFBundleIdentifier</key><string>com.kongvox.studio</string>
 <key>CFBundleIconFile</key><string>KongVox.icns</string>
+<key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
+<key>CFBundleLocalizations</key><array><string>zh-Hans</string></array>
 <key>CFBundleName</key><string>KongVox</string>
 <key>CFBundleDisplayName</key><string>KongVox</string>
 <key>CFBundlePackageType</key><string>APPL</string>
