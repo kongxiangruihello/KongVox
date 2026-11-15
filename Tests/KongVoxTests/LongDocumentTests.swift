@@ -41,6 +41,59 @@ final class LongDocumentTests: XCTestCase {
         XCTAssertEqual(p.segments.map(\.text).joined(), original)
         XCTAssertEqual(p.fullText, original)
     }
+    @MainActor func testLegacyLongManuscriptDownloadRecoveryAndOverwrite() async throws {
+        let root = try Version03Tests().temporary()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audio = root.appendingPathComponent("Audio")
+        try FileManager.default.createDirectory(at: audio, withIntermediateDirectories: true)
+        let fixture = CosyVoiceTests()
+        var legacy = Project()
+        legacy.settings = fixture.settings()
+        let first = String(repeating: "第一章内容。", count: 28)
+        let old = String(repeating: "第二章旧稿。", count: 28)
+        let revised = String(repeating: "第二章新稿。", count: 28)
+        legacy.segments = [Segment(text: first), Segment(text: old)]
+        for index in legacy.segments.indices {
+            let take = Take(file: "old-\(index).wav", fingerprint: legacy.segments[index].fingerprint(legacy.settings),
+                            spokenText: legacy.segments[index].text)
+            try AudioFiles.writePCM(Data(count: 48000), to: audio.appendingPathComponent(take.file))
+            legacy.segments[index].takes = [take]
+            legacy.segments[index].selectedTake = take.id
+        }
+        try JSONEncoder().encode([legacy]).write(to: root.appendingPathComponent("projects.json"))
+        let studio = Studio(root: root, client: fixture.client(), keyProvider: { _ in "fixture" })
+        let destination = root.appendingPathComponent("交付.zip")
+        try ExportBundle.write(urls: studio.currentURLs(), texts: [first, old], gaps: legacy.gaps,
+                               normalize: false, destination: destination)
+        let previous = try Data(contentsOf: destination)
+        studio.edit { $0.longText = first + "\n\n" + revised }
+        CosyProtocol.requests = []
+        CosyProtocol.downloadStatus = 503
+        defer { CosyProtocol.downloadStatus = 200 }
+        studio.generate(); await studio.task?.value
+        XCTAssertEqual(studio.project?.segments.first?.current?.file, "old-0.wav")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audio.appendingPathComponent("old-1.wav").path))
+        let reopened = Studio(root: root, client: fixture.client(), keyProvider: { _ in "" })
+        CosyProtocol.downloadStatus = 200
+        reopened.generate(); await reopened.task?.value
+        XCTAssertEqual(CosyProtocol.requests.filter { $0.httpMethod == "POST" }.count, 1)
+        let current = try XCTUnwrap(reopened.project)
+        let output = try reopened.currentURLs()
+        XCTAssertEqual(current.segments.map(\.text), [first, revised])
+        try ExportBundle.write(urls: output, texts: current.segments.map(\.text), gaps: current.gaps,
+                               normalize: false, destination: destination)
+        XCTAssertNotEqual(try Data(contentsOf: destination), previous)
+        let extracted = root.appendingPathComponent("export-check")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        process.arguments = ["-x", "-k", destination.path, extracted.path]
+        try process.run(); process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        let subtitles = try String(contentsOf: extracted.appendingPathComponent("配音.srt"), encoding: .utf8)
+        XCTAssertTrue(subtitles.contains(revised))
+        XCTAssertFalse(subtitles.contains(old))
+    }
+
     @MainActor func testFullGenerationResumeAndExport() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -78,7 +131,7 @@ final class LongDocumentTests: XCTestCase {
         }
         XCTAssertEqual(resumed.lastDelivery(for: resumed.selected!)?.signature, resumed.project?.exportSignature)
         resumed.edit { $0.longText = article + "修改。" }
-        XCTAssertNotEqual(resumed.lastDelivery(for: resumed.selected!)?.signature, resumed.project?.exportSignature)
+        XCTAssertEqual(resumed.lastDelivery(for: resumed.selected!)?.changes(from: resumed.project!), ["正文已改"])
         XCTAssertFalse(resumed.fullAudioReady)
         XCTAssertThrowsError(try resumed.currentURLs())
         resumed.setLongMode(false)

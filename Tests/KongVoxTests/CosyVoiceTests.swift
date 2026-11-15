@@ -7,6 +7,7 @@ import XCTest
 final class CosyProtocol: URLProtocol {
     static var requests: [URLRequest] = []
     static var downloadStatus = 200
+    static var downloadErrorBody: Data?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
@@ -16,6 +17,8 @@ final class CosyProtocol: URLProtocol {
         let data: Data
         if synthesis {
             data = Data(#"{"output":{"finish_reason":"stop","audio":{"url":"http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/test.wav?Signature=fixture"}}}"#.utf8)
+        } else if let body = Self.downloadErrorBody {
+            data = body
         } else {
             var wav = WAVDecoderTests.fixture(rate: 48000, channels: 2)
             wav.replaceSubrange(4..<8, with: Data(repeating: 255, count: 4))

@@ -83,10 +83,11 @@ struct DeliveryView: View {
                 }
                 if let previous = studio.lastDelivery(for: p.id) {
                     HStack {
+                        let changes = previous.changes(from: p)
                         VStack(alignment: .leading) {
                             Text("上次：\(previous.url.path)").lineLimit(1).truncationMode(.middle)
                             Text(previous.format.uppercased() + (previous.date.map { " · " + $0.formatted() } ?? "") +
-                                 (previous.signature == p.exportSignature ? "" : " · 可能已过期"))
+                                 (changes.isEmpty ? "" : " · " + changes.joined(separator: "、")))
                         }.font(.caption)
                         Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([previous.url]) }
                             .disabled(!FileManager.default.fileExists(atPath: previous.url.path))

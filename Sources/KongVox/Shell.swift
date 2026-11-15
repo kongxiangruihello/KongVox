@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 // The main window since 0.15: projects on the left; one project worked through four steps,
 // 文稿 → 声音 → 校对 → 导出, each with its own inspector; a fixed footer for playback and the next action.
@@ -54,6 +55,7 @@ struct StudioView: View {
     @AppStorage("KongVox.lastStep") private var lastStep = 0
     @State private var restoredWorkspace = false
     @AppStorage("KongVox.sidebarWidth") private var savedSidebarWidth = 240.0
+    @AppStorage("KongVox.showSidebar") private var showSidebar = true
     @GestureState private var sidebarDrag: CGFloat = 0
 
     private func sidebarWidth(_ width: CGFloat) -> CGFloat {
@@ -76,17 +78,25 @@ struct StudioView: View {
             .accessibilityHidden(true)
     }
     var body: some View {
-        NavigationSplitView {
-            ProjectSidebar(state: state)
-                .overlay(alignment: .trailing) { sidebarResizeHandle }
-                .navigationSplitViewColumnWidth(sidebarWidth(savedSidebarWidth + sidebarDrag))
-        } detail: {
+        HStack(spacing: 0) {
+            if showSidebar {
+                ProjectSidebar(state: state)
+                    .frame(width: sidebarWidth(savedSidebarWidth + sidebarDrag))
+                    .background(.regularMaterial)
+                sidebarResizeHandle
+                    .overlay { Divider().allowsHitTesting(false) }
+            }
             Group {
                 if let p = studio.project { ProjectWorkspace(state: state, project: p) }
                 else { Text("选择或新建一个项目").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .windowBackgroundColor))
         }
+        .toolbar {
+            Button { showSidebar.toggle() } label: { Label(showSidebar ? "隐藏侧栏" : "显示侧栏", systemImage: "sidebar.left") }
+        }
+        .onChange(of: state.sidebarReveal) { _ in showSidebar = true }
         .tint(Palette.accent)
         .onAppear {
             guard !restoredWorkspace else { return }
@@ -276,14 +286,25 @@ struct ProjectSidebar: View {
                                     .padding(.leading, 12)
                                     .background(dropTarget == folder.id ? Palette.accent.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 5))
                                     .help(groupLabel(folder))
-                                    .dropDestination(for: String.self) { values, _ in
-                                        let ids = Set(values.compactMap(UUID.init(uuidString:))).intersection(studio.projects.map(\.id))
-                                        guard !studio.isWorking, !ids.isEmpty else { return false }
-                                        move(ids, to: folder.id)
+                                    .onDrop(of: [UTType.plainText], isTargeted: Binding(
+                                        get: { dropTarget == folder.id },
+                                        set: { targeted in
+                                            if targeted { dropTarget = folder.id }
+                                            else if dropTarget == folder.id { dropTarget = nil }
+                                        }
+                                    )) { providers in
+                                        guard !studio.isWorking,
+                                              let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else { return false }
+                                        provider.loadObject(ofClass: NSString.self) { value, _ in
+                                            guard let text = value as? String, let id = UUID(uuidString: text) else { return }
+                                            Task { @MainActor in
+                                                guard !studio.isWorking, studio.projects.contains(where: { $0.id == id }),
+                                                      organization.folders.contains(where: { $0.id == folder.id }) else { return }
+                                                move([id], to: folder.id)
+                                                studio.status = "已移到「\(groupLabel(folder))」。可在＋菜单撤销移组。"
+                                            }
+                                        }
                                         return true
-                                    } isTargeted: { targeted in
-                                        if targeted { dropTarget = folder.id }
-                                        else if dropTarget == folder.id { dropTarget = nil }
                                     }
                                     .contextMenu {
                                         Button("在此分组新建配音…") { editName(.narration, folder: folder.id) }
@@ -578,11 +599,21 @@ struct ProjectSidebar: View {
                         if value { checked.insert(project.id) } else { checked.remove(project.id) }
                     })) { ProjectRow(project: project) }
                 } else {
-                    VStack(alignment: .leading) {
-                        ProjectRow(project: project)
-                        if !browsingTree { Text(path(for: project.id)).font(.caption2).foregroundStyle(.secondary) }
+                    HStack(spacing: 6) {
+                        VStack(alignment: .leading) {
+                            ProjectRow(project: project)
+                            if !browsingTree { Text(path(for: project.id)).font(.caption2).foregroundStyle(.secondary) }
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "line.3.horizontal")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 24, height: 28)
+                            .contentShape(Rectangle())
+                            .onDrag { NSItemProvider(object: project.id.uuidString as NSString) }
+                            .help("拖到分组标题可移组")
+                            .accessibilityHidden(true)
                     }
-                        .draggable(project.id.uuidString)
                         .contextMenu {
                             Button("编辑配音…") { editName(.audio(project.id), current: project.title, folder: organization.membership[project.id]) }
                             Menu("复制配音") {
@@ -1413,15 +1444,23 @@ struct ReviewRow: View {
             let receipt = studio.recoveryFile(segment, project: project)
             let local = FileManager.default.fileExists(atPath: DownloadReceipt.generatedPCM(receipt).path) ||
                 FileManager.default.fileExists(atPath: DownloadReceipt.audioFile(receipt).path)
-            let recover = DownloadReceipt.exists(receipt)
+            let expired = DownloadReceipt.isExpired(receipt) && !local
+            let recover = DownloadReceipt.exists(receipt) && !expired
             Text(project.taskMessage ?? "本段生成失败。").font(.caption).foregroundStyle(.orange)
+            if expired { Text("下载链接已过期，需重新合成。").font(.caption) }
             Button(recover ? (local ? "从本地音频恢复" : "继续下载") : "重新合成…") {
                 if recover { studio.generate(only: segment.id) } else { confirmRetry = true }
             }.disabled(studio.isWorking)
         }
         }
         .confirmationDialog("重新合成本段？", isPresented: $confirmRetry) {
-            Button("重新合成") { studio.generate(only: segment.id) }
+            Button("重新合成") {
+                do {
+                    let receipt = studio.recoveryFile(segment, project: project)
+                    if DownloadReceipt.isExpired(receipt) { try DownloadReceipt.clear(receipt) }
+                    studio.generate(only: segment.id)
+                } catch { studio.error = "无法清除过期下载：\(error.localizedDescription)" }
+            }
         } message: { Text("云端服务可能再次计费。") }
     }
 }

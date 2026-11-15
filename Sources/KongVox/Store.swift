@@ -727,13 +727,30 @@ import UniformTypeIdentifiers
         let format: String
         var date: Date?
         var signature: String?
+        var manuscript: String?
+        var audio: [String]?
+        var subtitles: String?
+
+        func changes(from project: Project) -> [String] {
+            guard signature != project.exportSignature else { return [] }
+            var changes: [String] = []
+            if let manuscript, manuscript != project.deliveryManuscriptSignature { changes.append("正文已改") }
+            if let audio, audio != project.segments.compactMap({ $0.current?.file }) { changes.append("采用的音频已换") }
+            if let subtitles, subtitles != project.deliverySubtitleSignature { changes.append("字幕已更新") }
+            return changes.isEmpty ? ["成品可能已过期"] : changes
+        }
     }
     func lastDelivery(for id: UUID) -> LastDelivery? {
         guard let data = UserDefaults.standard.data(forKey: "KongVox.delivery." + id.uuidString) else { return nil }
         return try? JSONDecoder().decode(LastDelivery.self, from: data)
     }
     func rememberDelivery(_ url: URL, format: String, projectID: UUID) {
-        if let data = try? JSONEncoder().encode(LastDelivery(url: url, format: format, date: Date(), signature: projects.first { $0.id == projectID }?.exportSignature)) {
+        let project = projects.first { $0.id == projectID }
+        let receipt = LastDelivery(url: url, format: format, date: Date(), signature: project?.exportSignature,
+                                   manuscript: project?.deliveryManuscriptSignature,
+                                   audio: project?.segments.compactMap { $0.current?.file },
+                                   subtitles: project?.deliverySubtitleSignature)
+        if let data = try? JSONEncoder().encode(receipt) {
             UserDefaults.standard.set(data, forKey: "KongVox.delivery." + projectID.uuidString)
         }
     }

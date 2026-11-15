@@ -30,6 +30,26 @@ final class Version03Tests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: DownloadReceipt.audioFile(file).path))
     }
+    func testExplicitExpiryPersistsUntilUserDiscardsReceipt() async throws {
+        let root = try temporary()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = CosyVoiceTests()
+        let file = root.appendingPathComponent("receipt.json")
+        CosyProtocol.requests = []
+        CosyProtocol.downloadStatus = 403
+        CosyProtocol.downloadErrorBody = Data("<Error><Code>RequestExpired</Code></Error>".utf8)
+        defer { CosyProtocol.downloadStatus = 200; CosyProtocol.downloadErrorBody = nil }
+        do {
+            _ = try await fixture.client().generate(text: "测试", settings: fixture.settings(), key: "fixture", recoveryFile: file)
+            XCTFail("Expired download should fail")
+        } catch { XCTAssertEqual((error as? ServiceFailure)?.category, "expired_download") }
+        XCTAssertTrue(DownloadReceipt.isExpired(file))
+        XCTAssertEqual(CosyProtocol.requests.filter { $0.httpMethod == "POST" }.count, 1)
+        try DownloadReceipt.clear(file)
+        XCTAssertFalse(DownloadReceipt.isExpired(file))
+        XCTAssertFalse(DownloadReceipt.exists(file))
+    }
+
     func testUnsafeRecoveryAndInvalidAudio() async throws {
         let dir = try temporary(); defer { try? FileManager.default.removeItem(at: dir) }
         let file = dir.appendingPathComponent("receipt.json"), helper = CosyVoiceTests()

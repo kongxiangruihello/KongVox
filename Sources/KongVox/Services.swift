@@ -83,7 +83,15 @@ struct SpeechClient {
             do { (audio, response) = try await session.data(for: request) }
             catch { throw ServiceFailure.network(error, download: true) }
             guard let http = response as? HTTPURLResponse else { throw ServiceFailure.http(0, body: Data(), download: true) }
-            guard (200..<300).contains(http.statusCode) else { throw ServiceFailure.http(http.statusCode, body: Data(), download: true) }
+            guard (200..<300).contains(http.statusCode) else {
+                let responseText = String(decoding: audio.prefix(8192), as: UTF8.self)
+                if http.statusCode == 403, let file = recoveryFile,
+                   ["<Code>RequestExpired</Code>", "<Code>ExpiredToken</Code>", "<Message>Request has expired."].contains(where: responseText.contains) {
+                    try Data().write(to: DownloadReceipt.expirationFile(file), options: .atomic)
+                    throw ServiceFailure(stage: "音频下载失败", category: "expired_download", hint: "下载链接已过期，请确认后重新合成，可能再次计费。", status: 403)
+                }
+                throw ServiceFailure.http(http.statusCode, body: Data(), download: true)
+            }
             if let file = recoveryFile { try audio.write(to: DownloadReceipt.audioFile(file), options: .atomic) }
         }
         try Task.checkCancellation()

@@ -221,6 +221,27 @@ struct VoxError: LocalizedError {
 }
 
 extension Project {
+    var deliveryManuscriptSignature: String {
+        deliveryDigest(fullText)
+    }
+
+    var deliverySubtitleSignature: String {
+        deliveryDigest(DeliverySubtitleSettings(style: resolvedSubtitleStyle, alignment: resolvedAlignment, edits: captionEdits))
+    }
+
+    private struct DeliverySubtitleSettings: Encodable {
+        var style: SubtitleStyle
+        var alignment: SubtitleAlignmentMode
+        var edits: CaptionEdits?
+    }
+
+    private func deliveryDigest(_ value: some Encodable) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(value)) ?? Data()
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     var exportSignature: String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

@@ -56,8 +56,10 @@ struct DownloadReceipt: Codable {
     static func exists(_ file: URL) -> Bool {
         [generatedPCM(file), file].contains { FileManager.default.fileExists(atPath: $0.path) }
     }
+    static func expirationFile(_ file: URL) -> URL { file.appendingPathExtension("expired") }
+    static func isExpired(_ file: URL) -> Bool { FileManager.default.fileExists(atPath: expirationFile(file).path) }
     static func clear(_ file: URL) throws {
-        for url in [audioFile(file), file, generatedPCM(file)] where FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+        for url in [audioFile(file), file, generatedPCM(file), expirationFile(file)] where FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
     }
     func save(to file: URL) throws {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
